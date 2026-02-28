@@ -3,31 +3,55 @@ package fts
 import (
 	"context"
 	"fmt"
-	"fts-hw/internal/domain/models"
-	"fts-hw/internal/utils"
+	"io"
 	"sort"
 	"time"
 	"unicode/utf8"
 
+	"fts-hw/internal/utils"
+
 	snowballeng "github.com/kljensen/snowball/english"
 )
 
+// ── Types ────────────────────────────────────────────────────────────────────
+
 type Document struct {
-	ID    string
-	Count int
+	ID    uint64
+	Count uint32
 }
+
+type ResultData struct {
+	ID            uint64
+	UniqueMatches int
+	TotalMatches  int
+}
+
+type SearchResult struct {
+	Results           []ResultData
+	TotalResultsCount int
+	Timings           map[string]string
+}
+
+// ── Index Interface ──────────────────────────────────────────────────────────
 
 type Index interface {
 	Search(key string) ([]Document, error)
-	Insert(key string, id string) error
+	Insert(key string, id uint64) error
+	Serialize(w io.Writer) error
 	Analyze() utils.TrieStats
 }
+
+type IndexLoader func(r io.Reader) (Index, error)
+
+// ── KeyGenerator ─────────────────────────────────────────────────────────────
+
+type KeyGenerator func(token string) ([]string, error)
 
 func WordKeys(token string) ([]string, error) {
 	return []string{token}, nil
 }
 
-type KeyGenerator func(token string) ([]string, error)
+// ── SearchService ────────────────────────────────────────────────────────────
 
 type SearchService struct {
 	index  Index
@@ -41,11 +65,44 @@ func NewSearchService(index Index, keyGen KeyGenerator) *SearchService {
 	}
 }
 
+func NewSearchServiceFromReader(r io.Reader, loader IndexLoader, keyGen KeyGenerator) (*SearchService, error) {
+	index, err := loader(r)
+	if err != nil {
+		return nil, fmt.Errorf("fts: load index: %w", err)
+	}
+	return NewSearchService(index, keyGen), nil
+}
+
+// ── Tokenizer ────────────────────────────────────────────────────────────────
+func isAlphanumeric(char rune) bool {
+	return (char >= 'A' && char <= 'Z') ||
+		(char >= 'a' && char <= 'z') ||
+		(char >= '0' && char <= '9')
+}
+
+func isNumeric(token string) bool {
+	if len(token) == 0 {
+		return false
+	}
+	for _, c := range token {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// "error 404"         → ["error", "404"]
+// "192.168.1.1"       → ["192", "168", "1", "1"]
+// "/api/v1/users"     → ["api", "v1", "users"]
+// "connection_refused"→ ["connection", "refused"]
+// "GET /health 200"   → ["GET", "health", "200"]
 func Tokenize(content string) []string {
 	lastSplit := 0
 	tokens := make([]string, 0)
+
 	for i, char := range content {
-		if char >= 'A' && char <= 'Z' || char >= 'a' && char <= 'z' {
+		if isAlphanumeric(char) {
 			continue
 		}
 
@@ -54,9 +111,7 @@ func Tokenize(content string) []string {
 		}
 
 		charBytes := utf8.RuneLen(char)
-		// Update lastSplit considering the byte length of the character
-		// We don't use `i + 1` because characters can occupy more than one byte in UTF-8.
-		lastSplit = i + charBytes // account for the character's byte length
+		lastSplit = i + charBytes
 	}
 
 	if len(content) > lastSplit {
@@ -66,28 +121,35 @@ func Tokenize(content string) []string {
 	return tokens
 }
 
+// ── IndexDocument ────────────────────────────────────────────────────────────
+
 func (s *SearchService) IndexDocument(
 	ctx context.Context,
-	docID string,
+	docID uint64,
 	content string,
 ) error {
 	tokens := Tokenize(content)
+
 	for _, token := range tokens {
-		// skip stop words
-		if snowballeng.IsStopWord(token) {
+		if len(token) < 3 {
 			continue
 		}
-		//lowercase and stemmimg (eng only)
-		token = snowballeng.Stem(token, false)
-		keys, err := s.keyGen(token)
-		if err != nil {
-			return fmt.Errorf("trie: index document: %w", err)
+
+		if !isNumeric(token) {
+			if snowballeng.IsStopWord(token) {
+				continue
+			}
+			token = snowballeng.Stem(token, false)
 		}
 
-		for _, trigram := range keys {
-			insertErr := s.index.Insert(trigram, docID)
-			if insertErr != nil {
-				return fmt.Errorf("trie: insert document while indexing: %w", insertErr)
+		keys, err := s.keyGen(token)
+		if err != nil {
+			return fmt.Errorf("fts: index document: keygen: %w", err)
+		}
+
+		for _, key := range keys {
+			if err := s.index.Insert(key, docID); err != nil {
+				return fmt.Errorf("fts: index document: insert: %w", err)
 			}
 		}
 	}
@@ -95,63 +157,68 @@ func (s *SearchService) IndexDocument(
 	return nil
 }
 
+// ── SearchDocuments ──────────────────────────────────────────────────────────
+
 func (s *SearchService) SearchDocuments(
 	ctx context.Context,
 	query string,
 	maxResults int,
-) (*models.SearchResult, error) {
+) (*SearchResult, error) {
 	startTime := time.Now()
 	timings := make(map[string]string)
 
 	preprocessStart := time.Now()
 	tokens := Tokenize(query)
-	timings["preprocess"] = utils.FormatDuration(time.Since(preprocessStart))
+	timings["preprocess"] = formatDuration(time.Since(preprocessStart))
 
 	searchStart := time.Now()
 
-	docUniqueMatches := make(map[string]int)
-	docTotalMatches := make(map[string]int)
+	docUniqueMatches := make(map[uint64]int)
+	docTotalMatches := make(map[uint64]int)
 
 	for _, token := range tokens {
-		// skip stop words
-		if snowballeng.IsStopWord(token) {
+		if len(token) < 3 {
 			continue
 		}
-		//lowercase and stemmimg (eng only)
-		token = snowballeng.Stem(token, false)
+
+		if !isNumeric(token) {
+			if snowballeng.IsStopWord(token) {
+				continue
+			}
+			token = snowballeng.Stem(token, false)
+		}
 
 		keys, err := s.keyGen(token)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("fts: search: keygen: %w", err)
 		}
 
 		for _, key := range keys {
 			docs, err := s.index.Search(key)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("fts: search: index search: %w", err)
 			}
-			if len(docs) == 0 {
-				continue
-			}
+
 			for _, doc := range docs {
 				docUniqueMatches[doc.ID]++
-				docTotalMatches[doc.ID] += doc.Count
+				docTotalMatches[doc.ID] += int(doc.Count)
 			}
 		}
-
 	}
 
-	if len(docUniqueMatches) < maxResults {
-		maxResults = len(docUniqueMatches)
+	timings["search_tokens"] = formatDuration(time.Since(searchStart))
+
+	totalFound := len(docUniqueMatches)
+	if maxResults <= 0 || maxResults > totalFound {
+		maxResults = totalFound
 	}
 
-	results := make([]models.ResultData, 0, len(docUniqueMatches))
+	results := make([]ResultData, 0, totalFound)
 	for docID, uniqueMatches := range docUniqueMatches {
-		results = append(results, models.ResultData{
+		results = append(results, ResultData{
 			ID:            docID,
 			UniqueMatches: uniqueMatches,
 			TotalMatches:  docTotalMatches[docID],
-			Document:      models.Document{},
 		})
 	}
 
@@ -162,24 +229,32 @@ func (s *SearchService) SearchDocuments(
 		return results[i].UniqueMatches > results[j].UniqueMatches
 	})
 
-	timings["search_tokens"] = utils.FormatDuration(time.Since(searchStart))
+	timings["total"] = formatDuration(time.Since(startTime))
 
-	timings["total"] = utils.FormatDuration(time.Since(startTime))
-
-	var lastIndex int
-	lastIndex = maxResults
-
-	if len(docUniqueMatches) > maxResults {
-		lastIndex = len(docUniqueMatches)
-	}
-
-	return &models.SearchResult{
-		ResultData:        results[:lastIndex],
+	return &SearchResult{
+		Results:           results[:maxResults],
+		TotalResultsCount: totalFound,
 		Timings:           timings,
-		TotalResultsCount: len(docUniqueMatches),
 	}, nil
 }
 
+// ── Persist ──────────────────────────────────────────────────────────────────
+
+func (s *SearchService) Persist(w io.Writer) error {
+	return s.index.Serialize(w)
+}
+
+// ── Analyze ──────────────────────────────────────────────────────────────────
+
 func (s *SearchService) Analyse() utils.TrieStats {
 	return s.index.Analyze()
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+func formatDuration(d time.Duration) string {
+	if d < time.Millisecond {
+		return fmt.Sprintf("%dµs", d.Microseconds())
+	}
+	return fmt.Sprintf("%dms", d.Milliseconds())
 }
