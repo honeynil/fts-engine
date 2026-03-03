@@ -1,4 +1,4 @@
-module fts-hw
+module github.com/honeynil/fts-engine
 
 go 1.25
 
