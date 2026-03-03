@@ -8,7 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"fts-hw/internal/utils"
+	"github.com/honeynil/fts-engine/internal/utils"
 
 	snowballeng "github.com/kljensen/snowball/english"
 )

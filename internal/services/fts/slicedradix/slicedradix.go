@@ -3,8 +3,8 @@ package radixtriesliced
 import (
 	"encoding/binary"
 	"fmt"
-	"fts-hw/internal/services/fts"
-	"fts-hw/internal/utils"
+	"github.com/honeynil/fts-engine/internal/services/fts"
+	"github.com/honeynil/fts-engine/internal/utils"
 	"io"
 	"sync"
 )

@@ -2,7 +2,7 @@ package radixtriesliced
 
 import (
 	"bytes"
-	"fts-hw/internal/services/fts"
+	"github.com/honeynil/fts-engine/internal/services/fts"
 	"testing"
 )
 
