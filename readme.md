@@ -1,4 +1,4 @@
-# Full-Text Search Engine
+# Fast Turtle Search Engine
 
 Reusable full-text search engine in Go with configurable indexes, filters, stemming pipeline, and snapshot support.
 
