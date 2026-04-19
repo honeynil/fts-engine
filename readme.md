@@ -2,7 +2,7 @@
 
 Reusable full-text search engine in Go with configurable indexes, filters, stemming pipeline, and snapshot support.
 
-<p align="center"><img src="docs/logo.jpg" alt="Logo" width="50%"></p>
+<p align="center"><img src="docs/logo.png" alt="Logo" width="50%"></p>
 
 ### Demo Cast
 
