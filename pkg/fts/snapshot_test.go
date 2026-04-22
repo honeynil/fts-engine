@@ -170,3 +170,85 @@ func TestSaveIndexSnapshotWritesPayload(t *testing.T) {
 		t.Fatal("SaveIndexSnapshot() wrote empty payload")
 	}
 }
+
+func TestSaveLoadMultiIndexSnapshotRoundTrip(t *testing.T) {
+	codecName := fmt.Sprintf("test-multi-index-%s", t.Name())
+	if err := RegisterIndexSnapshotCodec(codecName,
+		func(index Index, w io.Writer) error {
+			return index.(Serializable).Serialize(w)
+		},
+		loadSnapshotIndex,
+	); err != nil {
+		t.Fatalf("register codec: %v", err)
+	}
+
+	factory := func(name string) (Index, error) { return newSnapshotIndex(), nil }
+	svc := NewMultiField(factory, WordKeys)
+
+	doc := Document{ID: "doc-1", Fields: map[string]Field{
+		"title": {Value: "rosa barge"},
+		"body":  {Value: "french canal"},
+	}}
+	if err := svc.Index(context.Background(), doc); err != nil {
+		t.Fatalf("Index() error = %v", err)
+	}
+
+	indexes, _ := svc.SnapshotFields()
+	if len(indexes) != 2 {
+		t.Fatalf("SnapshotFields() = %d indexes, want 2", len(indexes))
+	}
+
+	codecs := map[string]string{"title": codecName, "body": codecName}
+
+	var buf bytes.Buffer
+	if err := SaveMultiIndexSnapshot(&buf, codecs, indexes); err != nil {
+		t.Fatalf("SaveMultiIndexSnapshot() error = %v", err)
+	}
+	if buf.Len() == 0 {
+		t.Fatal("SaveMultiIndexSnapshot() wrote empty payload")
+	}
+
+	loaded, err := LoadMultiIndexSnapshot(&buf)
+	if err != nil {
+		t.Fatalf("LoadMultiIndexSnapshot() error = %v", err)
+	}
+	if len(loaded.Fields) != 2 {
+		t.Fatalf("loaded %d fields, want 2", len(loaded.Fields))
+	}
+
+	restoredIndexes := make(map[string]Index, len(loaded.Fields))
+	for name, entry := range loaded.Fields {
+		if entry.IndexName != codecName {
+			t.Fatalf("field %q codec = %q, want %q", name, entry.IndexName, codecName)
+		}
+		restoredIndexes[name] = entry.Index
+	}
+
+	restored := NewMultiFieldFromIndexes(restoredIndexes, WordKeys)
+
+	res, err := restored.SearchField(context.Background(), "title", "rosa", 10)
+	if err != nil {
+		t.Fatalf("SearchField(title, rosa) error = %v", err)
+	}
+	if res.TotalResultsCount != 1 || res.Results[0].ID != "doc-1" {
+		t.Fatalf("restored title search: got %+v, want doc-1", res.Results)
+	}
+
+	res, err = restored.SearchField(context.Background(), "body", "french", 10)
+	if err != nil {
+		t.Fatalf("SearchField(body, french) error = %v", err)
+	}
+	if res.TotalResultsCount != 1 || res.Results[0].ID != "doc-1" {
+		t.Fatalf("restored body search: got %+v, want doc-1", res.Results)
+	}
+}
+
+func TestLoadMultiIndexSnapshotRejectsWrongVersion(t *testing.T) {
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(multiIndexEnvelope{Version: 99}); err != nil {
+		t.Fatalf("encode bad envelope: %v", err)
+	}
+	if _, err := LoadMultiIndexSnapshot(&buf); err == nil {
+		t.Fatal("expected error for unsupported version")
+	}
+}

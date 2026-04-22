@@ -3,27 +3,31 @@ package slicedradix
 import (
 	"encoding/gob"
 	"fmt"
-	"github.com/dariasmyr/fts-engine/pkg/fts"
 	"io"
 	"sync"
+
+	"github.com/dariasmyr/fts-engine/pkg/fts"
 )
 
 type node struct {
-	prefix   string
-	children []int
-	docs     []fts.DocRef
+	prefix    string
+	children  []int
+	docs      []fts.DocRef
+	positions [][]uint32
 }
 
 type Index struct {
-	root  int
-	nodes []node
-	mu    sync.RWMutex
+	root     int
+	nodes    []node
+	mu       sync.RWMutex
+	docToOrd map[fts.DocID]uint32
 }
 
 type snapshotNode struct {
-	Prefix   string
-	Children []int
-	Docs     []fts.DocRef
+	Prefix    string
+	Children  []int
+	Docs      []fts.DocRef
+	Positions [][]uint32
 }
 
 type snapshotIndex struct {
@@ -34,7 +38,17 @@ type snapshotIndex struct {
 func New() *Index {
 	var t Index
 	t.root = t.newNode("")
+	t.docToOrd = make(map[fts.DocID]uint32)
 	return &t
+}
+
+func (t *Index) ordinalFor(id fts.DocID) uint32 {
+	if ord, ok := t.docToOrd[id]; ok {
+		return ord
+	}
+	ord := uint32(len(t.docToOrd))
+	t.docToOrd[id] = ord
+	return ord
 }
 
 func (t *Index) Serialize(w io.Writer) error {
@@ -48,10 +62,18 @@ func (t *Index) Serialize(w io.Writer) error {
 
 	for i := range t.nodes {
 		n := t.nodes[i]
+		var positions [][]uint32
+		if len(n.positions) > 0 {
+			positions = make([][]uint32, len(n.positions))
+			for j, p := range n.positions {
+				positions[j] = append([]uint32(nil), p...)
+			}
+		}
 		snap.Nodes = append(snap.Nodes, snapshotNode{
-			Prefix:   n.prefix,
-			Children: append([]int(nil), n.children...),
-			Docs:     append([]fts.DocRef(nil), n.docs...),
+			Prefix:    n.prefix,
+			Children:  append([]int(nil), n.children...),
+			Docs:      append([]fts.DocRef(nil), n.docs...),
+			Positions: positions,
 		})
 	}
 
@@ -69,16 +91,30 @@ func Load(r io.Reader) (fts.Index, error) {
 	}
 
 	idx := &Index{
-		root:  snap.Root,
-		nodes: make([]node, 0, len(snap.Nodes)),
+		root:     snap.Root,
+		nodes:    make([]node, 0, len(snap.Nodes)),
+		docToOrd: make(map[fts.DocID]uint32),
 	}
 
 	for i := range snap.Nodes {
 		s := snap.Nodes[i]
+		for _, d := range s.Docs {
+			if _, ok := idx.docToOrd[d.ID]; !ok {
+				idx.docToOrd[d.ID] = d.Seq
+			}
+		}
+		var positions [][]uint32
+		if len(s.Positions) > 0 {
+			positions = make([][]uint32, len(s.Positions))
+			for j, p := range s.Positions {
+				positions[j] = append([]uint32(nil), p...)
+			}
+		}
 		idx.nodes = append(idx.nodes, node{
-			prefix:   s.Prefix,
-			children: append([]int(nil), s.Children...),
-			docs:     append([]fts.DocRef(nil), s.Docs...),
+			prefix:    s.Prefix,
+			children:  append([]int(nil), s.Children...),
+			docs:      append([]fts.DocRef(nil), s.Docs...),
+			positions: positions,
 		})
 	}
 
@@ -99,6 +135,14 @@ func lcp(a, b string) int {
 }
 
 func (t *Index) Insert(word string, docID fts.DocID) error {
+	return t.insert(word, docID, false, 0)
+}
+
+func (t *Index) InsertAt(word string, docID fts.DocID, position uint32) error {
+	return t.insert(word, docID, true, position)
+}
+
+func (t *Index) insert(word string, docID fts.DocID, hasPos bool, pos uint32) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -117,7 +161,7 @@ func (t *Index) Insert(word string, docID fts.DocID) error {
 				current = child
 				rest = rest[p:]
 				if rest == "" {
-					t.addDoc(current, docID)
+					t.recordDoc(current, docID, hasPos, pos)
 					return nil
 				}
 				advanced = true
@@ -135,12 +179,12 @@ func (t *Index) Insert(word string, docID fts.DocID) error {
 
 			if newSuffix != "" {
 				newIdx := t.newNode(newSuffix)
-				t.addDoc(newIdx, docID)
+				t.recordDoc(newIdx, docID, hasPos, pos)
 				t.nodes[middle].children = append(t.nodes[middle].children, newIdx)
 				return nil
 			}
 
-			t.addDoc(middle, docID)
+			t.recordDoc(middle, docID, hasPos, pos)
 			return nil
 		}
 
@@ -149,21 +193,47 @@ func (t *Index) Insert(word string, docID fts.DocID) error {
 		}
 
 		newIdx := t.newNode(rest)
-		t.addDoc(newIdx, docID)
+		t.recordDoc(newIdx, docID, hasPos, pos)
 		t.nodes[current].children = append(t.nodes[current].children, newIdx)
 		return nil
 	}
 }
 
-func (t *Index) addDoc(nodeIdx int, docID fts.DocID) {
+func (t *Index) recordDoc(nodeIdx int, docID fts.DocID, hasPos bool, pos uint32) {
 	n := &t.nodes[nodeIdx]
+	if last := len(n.docs) - 1; last >= 0 && n.docs[last].ID == docID {
+		n.docs[last].Count++
+		if hasPos {
+			t.growPositions(nodeIdx, len(n.docs))
+			n.positions[last] = append(n.positions[last], pos)
+		}
+		return
+	}
+
 	for i := range n.docs {
 		if n.docs[i].ID == docID {
 			n.docs[i].Count++
+			if hasPos {
+				t.growPositions(nodeIdx, len(n.docs))
+				n.positions[i] = append(n.positions[i], pos)
+			}
 			return
 		}
 	}
-	n.docs = append(n.docs, fts.DocRef{ID: docID, Count: 1})
+	seq := t.ordinalFor(docID)
+	n.docs = append(n.docs, fts.DocRef{ID: docID, Count: 1, Seq: seq})
+	if hasPos {
+		t.growPositions(nodeIdx, len(n.docs))
+		last := len(n.docs) - 1
+		n.positions[last] = append(n.positions[last], pos)
+	}
+}
+
+func (t *Index) growPositions(nodeIdx int, want int) {
+	n := &t.nodes[nodeIdx]
+	for len(n.positions) < want {
+		n.positions = append(n.positions, nil)
+	}
 }
 
 func (t *Index) Search(word string) ([]fts.DocRef, error) {
@@ -184,6 +254,104 @@ func (t *Index) Search(word string) ([]fts.DocRef, error) {
 		current = nextNode
 		rest = nextRest
 	}
+}
+
+func (t *Index) SearchPositional(word string) ([]fts.PositionalDocRef, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	current := t.root
+	rest := word
+
+	for {
+		nextNode, nextRest, matched, exact := t.next(current, rest)
+		if nextNode == 0 || !matched {
+			return nil, nil
+		}
+		if exact {
+			n := &t.nodes[nextNode]
+			out := make([]fts.PositionalDocRef, 0, len(n.docs))
+			for i := range n.docs {
+				var positions []uint32
+				if i < len(n.positions) {
+					positions = n.positions[i]
+				}
+				out = append(out, fts.PositionalDocRef{
+					ID:        n.docs[i].ID,
+					Positions: positions,
+				})
+			}
+			return out, nil
+		}
+		current = nextNode
+		rest = nextRest
+	}
+}
+
+func (t *Index) SearchPrefix(prefix string) ([]fts.DocRef, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	if prefix == "" {
+		return t.collectSubtree(t.root), nil
+	}
+
+	current := t.root
+	rest := prefix
+	for {
+		nextNode, nextRest, matched, spansPrefix := t.prefixDescend(current, rest)
+		if !matched {
+			return nil, nil
+		}
+		if spansPrefix {
+			return t.collectSubtree(nextNode), nil
+		}
+		current = nextNode
+		rest = nextRest
+	}
+}
+
+func (t *Index) prefixDescend(current int, rest string) (int, string, bool, bool) {
+	for _, child := range t.nodes[current].children {
+		childPrefix := t.nodes[child].prefix
+		p := lcp(rest, childPrefix)
+		if p == 0 {
+			continue
+		}
+		if p == len(rest) {
+			return child, "", true, true
+		}
+		if p == len(childPrefix) {
+			return child, rest[p:], true, false
+		}
+		return 0, "", false, false
+	}
+	return 0, "", false, false
+}
+
+func (t *Index) collectSubtree(start int) []fts.DocRef {
+	aggregated := make(map[fts.DocID]uint32)
+	var order []fts.DocID
+
+	var dfs func(n int)
+	dfs = func(n int) {
+		for _, d := range t.nodes[n].docs {
+			if _, seen := aggregated[d.ID]; !seen {
+				order = append(order, d.ID)
+			}
+			aggregated[d.ID] += d.Count
+		}
+		for _, c := range t.nodes[n].children {
+			dfs(c)
+		}
+	}
+	dfs(start)
+
+	out := make([]fts.DocRef, 0, len(order))
+	for _, id := range order {
+		out = append(out, fts.DocRef{ID: id, Count: aggregated[id]})
+	}
+	return out
 }
 
 func (t *Index) next(current int, rest string) (int, string, bool, bool) {
@@ -256,4 +424,8 @@ func (t *Index) Analyze() fts.Stats {
 	return s
 }
 
-var _ fts.Index = (*Index)(nil)
+var (
+	_ fts.Index           = (*Index)(nil)
+	_ fts.PositionalIndex = (*Index)(nil)
+	_ fts.PrefixIndex     = (*Index)(nil)
+)

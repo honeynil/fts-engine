@@ -10,12 +10,14 @@ type DocID string
 type DocRef struct {
 	ID    DocID
 	Count uint32
+	Seq   uint32
 }
 
 type Result struct {
 	ID            DocID
 	UniqueMatches int
 	TotalMatches  int
+	Score         float64
 }
 
 type SearchResult struct {
@@ -24,10 +26,40 @@ type SearchResult struct {
 	Timings           map[string]string
 }
 
+const DefaultField = "_default"
+
+type Document struct {
+	ID     DocID
+	Fields map[string]Field
+}
+
+type Field struct {
+	Value    string
+	Pipeline Pipeline
+}
+
 type Index interface {
 	Insert(key string, id DocID) error
 	Search(key string) ([]DocRef, error)
 }
+
+type PositionalDocRef struct {
+	ID        DocID
+	Positions []uint32
+}
+
+type PositionalIndex interface {
+	Index
+	InsertAt(key string, id DocID, position uint32) error
+	SearchPositional(key string) ([]PositionalDocRef, error)
+}
+
+type PrefixIndex interface {
+	Index
+	SearchPrefix(prefix string) ([]DocRef, error)
+}
+
+type IndexFactory func(fieldName string) (Index, error)
 
 type Analyzer interface {
 	Analyze() Stats
@@ -45,7 +77,6 @@ type Pipeline interface {
 	Process(text string) []string
 }
 
-// Filter in a dynamic (bloom, cuckoo filters) that allow write on read
 type Filter interface {
 	Add(item []byte) bool
 	Contains(item []byte) bool
@@ -55,7 +86,6 @@ type BuildableFilter interface {
 	Build() error
 }
 
-// StaticFilter describes filter built from replayable key stream.
 type StaticFilter interface {
 	BuildFromKeyStream(stream func(func([]byte) bool) error) error
 	Contains(item []byte) bool
