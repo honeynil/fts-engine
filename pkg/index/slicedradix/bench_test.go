@@ -1,7 +1,6 @@
 package slicedradix
 
 import (
-	"fmt"
 	"math/rand"
 	"testing"
 
@@ -25,11 +24,11 @@ func benchKeys(n int) []string {
 
 func BenchmarkInsert(b *testing.B) {
 	keys := benchKeys(5000)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for b.Loop() {
 		idx := New()
 		for k, word := range keys {
-			_ = idx.Insert(word, fts.DocID(fmt.Sprintf("d-%d", k%500)))
+			_ = idx.Insert(word, fts.DocOrd(k%500))
 		}
 	}
 }
@@ -38,12 +37,11 @@ func BenchmarkSearchHit(b *testing.B) {
 	keys := benchKeys(5000)
 	idx := New()
 	for k, word := range keys {
-		_ = idx.Insert(word, fts.DocID(fmt.Sprintf("d-%d", k%500)))
+		_ = idx.Insert(word, fts.DocOrd(k%500))
 	}
 	target := keys[len(keys)/2]
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, _ = idx.Search(target)
 	}
 }
@@ -52,11 +50,10 @@ func BenchmarkSearchMiss(b *testing.B) {
 	keys := benchKeys(5000)
 	idx := New()
 	for k, word := range keys {
-		_ = idx.Insert(word, fts.DocID(fmt.Sprintf("d-%d", k%500)))
+		_ = idx.Insert(word, fts.DocOrd(k%500))
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, _ = idx.Search("zzzzmissing")
 	}
 }

@@ -9,7 +9,7 @@ import (
 func TestIndexInsertAndSearch(t *testing.T) {
 	idx := New()
 
-	if err := idx.Insert("hotel", "doc-1"); err != nil {
+	if err := idx.Insert("hotel", 1); err != nil {
 		t.Fatalf("Insert() error = %v", err)
 	}
 
@@ -20,16 +20,16 @@ func TestIndexInsertAndSearch(t *testing.T) {
 	if len(docs) != 1 {
 		t.Fatalf("len(docs) = %d, want 1", len(docs))
 	}
-	if docs[0].ID != "doc-1" {
-		t.Fatalf("doc ID = %q, want %q", docs[0].ID, "doc-1")
+	if docs[0].Ord != 1 {
+		t.Fatalf("doc Ord = %d, want 1", docs[0].Ord)
 	}
 }
 
 func TestIndexInsertSameDocIncrementsCount(t *testing.T) {
 	idx := New()
 
-	_ = idx.Insert("hotel", "doc-1")
-	_ = idx.Insert("hotel", "doc-1")
+	_ = idx.Insert("hotel", 1)
+	_ = idx.Insert("hotel", 1)
 
 	docs, err := idx.Search("hotel")
 	if err != nil {
@@ -46,8 +46,8 @@ func TestIndexInsertSameDocIncrementsCount(t *testing.T) {
 func TestIndexInsertDifferentDocs(t *testing.T) {
 	idx := New()
 
-	_ = idx.Insert("hotel", "doc-1")
-	_ = idx.Insert("hotel", "doc-2")
+	_ = idx.Insert("hotel", 1)
+	_ = idx.Insert("hotel", 2)
 
 	docs, err := idx.Search("hotel")
 	if err != nil {
@@ -72,7 +72,7 @@ func TestIndexSearchNotFound(t *testing.T) {
 
 func TestIndexAnalyze(t *testing.T) {
 	idx := New()
-	_ = idx.Insert("hotel", "doc-1")
+	_ = idx.Insert("hotel", 1)
 
 	stats := idx.Analyze()
 	if stats.Nodes == 0 {
@@ -83,13 +83,13 @@ func TestIndexAnalyze(t *testing.T) {
 func TestInsertAtAndSearchPositional(t *testing.T) {
 	idx := New()
 
-	if err := idx.InsertAt("hotel", "doc-1", 0); err != nil {
+	if err := idx.InsertAt("hotel", 1, 0); err != nil {
 		t.Fatalf("InsertAt: %v", err)
 	}
-	if err := idx.InsertAt("hotel", "doc-1", 7); err != nil {
+	if err := idx.InsertAt("hotel", 1, 7); err != nil {
 		t.Fatalf("InsertAt: %v", err)
 	}
-	if err := idx.InsertAt("hotel", "doc-2", 3); err != nil {
+	if err := idx.InsertAt("hotel", 2, 3); err != nil {
 		t.Fatalf("InsertAt: %v", err)
 	}
 
@@ -101,21 +101,21 @@ func TestInsertAtAndSearchPositional(t *testing.T) {
 		t.Fatalf("len(refs) = %d, want 2", len(refs))
 	}
 
-	got := map[string][]uint32{}
+	got := map[fts.DocOrd][]uint32{}
 	for _, r := range refs {
-		got[string(r.ID)] = r.Positions
+		got[r.Ord] = r.Positions
 	}
-	if want := []uint32{0, 7}; !equalPositions(got["doc-1"], want) {
-		t.Fatalf("doc-1 positions = %v, want %v", got["doc-1"], want)
+	if want := []uint32{0, 7}; !equalPositions(got[1], want) {
+		t.Fatalf("ord=1 positions = %v, want %v", got[1], want)
 	}
-	if want := []uint32{3}; !equalPositions(got["doc-2"], want) {
-		t.Fatalf("doc-2 positions = %v, want %v", got["doc-2"], want)
+	if want := []uint32{3}; !equalPositions(got[2], want) {
+		t.Fatalf("ord=2 positions = %v, want %v", got[2], want)
 	}
 }
 
 func TestSearchPositionalEmptyForNonPositionalInserts(t *testing.T) {
 	idx := New()
-	_ = idx.Insert("hotel", "doc-1")
+	_ = idx.Insert("hotel", 1)
 
 	refs, err := idx.SearchPositional("hotel")
 	if err != nil {
@@ -131,17 +131,17 @@ func TestSearchPositionalEmptyForNonPositionalInserts(t *testing.T) {
 
 func TestSearchPrefix(t *testing.T) {
 	idx := New()
-	inserts := map[string][]string{
-		"barack": {"doc-a", "doc-a"},
-		"banana": {"doc-b"},
-		"barge":  {"doc-c"},
-		"obama":  {"doc-a"},
-		"russia": {"doc-d"},
+	inserts := map[string][]fts.DocOrd{
+		"barack": {1, 1},
+		"banana": {2},
+		"barge":  {3},
+		"obamka": {1},
+		"russia": {4},
 	}
-	for word, docs := range inserts {
-		for _, d := range docs {
-			if err := idx.Insert(word, fts.DocID(d)); err != nil {
-				t.Fatalf("Insert %s %s: %v", word, d, err)
+	for word, ords := range inserts {
+		for _, o := range ords {
+			if err := idx.Insert(word, o); err != nil {
+				t.Fatalf("Insert %s %d: %v", word, o, err)
 			}
 		}
 	}
@@ -151,27 +151,27 @@ func TestSearchPrefix(t *testing.T) {
 		t.Fatalf("SearchPrefix: %v", err)
 	}
 
-	got := map[fts.DocID]uint32{}
+	got := map[fts.DocOrd]uint32{}
 	for _, r := range refs {
-		got[r.ID] = r.Count
+		got[r.Ord] = r.Count
 	}
-	if got["doc-a"] != 2 {
-		t.Fatalf("doc-a should have count 2 (barack×2), got %d", got["doc-a"])
+	if got[1] != 2 {
+		t.Fatalf("ord=1 should have count 2 (barack×2), got %d", got[1])
 	}
-	if got["doc-b"] != 1 {
-		t.Fatalf("doc-b should have count 1 (banana), got %d", got["doc-b"])
+	if got[2] != 1 {
+		t.Fatalf("ord=2 should have count 1 (banana), got %d", got[2])
 	}
-	if got["doc-c"] != 1 {
-		t.Fatalf("doc-c should have count 1 (barge), got %d", got["doc-c"])
+	if got[3] != 1 {
+		t.Fatalf("ord=3 should have count 1 (barge), got %d", got[3])
 	}
-	if _, ok := got["doc-d"]; ok {
-		t.Fatalf("doc-d has no 'ba*' word, got %+v", got)
+	if _, ok := got[4]; ok {
+		t.Fatalf("ord=4 has no 'ba*' word, got %+v", got)
 	}
 }
 
 func TestSearchPrefixNoMatch(t *testing.T) {
 	idx := New()
-	_ = idx.Insert("hello", "doc-1")
+	_ = idx.Insert("hello", 1)
 	refs, err := idx.SearchPrefix("zzz")
 	if err != nil {
 		t.Fatalf("SearchPrefix: %v", err)
@@ -183,12 +183,12 @@ func TestSearchPrefixNoMatch(t *testing.T) {
 
 func TestSearchPrefixExactKey(t *testing.T) {
 	idx := New()
-	_ = idx.Insert("barack", "doc-1")
+	_ = idx.Insert("barack", 1)
 	refs, err := idx.SearchPrefix("barack")
 	if err != nil {
 		t.Fatalf("SearchPrefix: %v", err)
 	}
-	if len(refs) != 1 || refs[0].ID != "doc-1" {
+	if len(refs) != 1 || refs[0].Ord != 1 {
 		t.Fatalf("exact-key prefix should match, got %+v", refs)
 	}
 }

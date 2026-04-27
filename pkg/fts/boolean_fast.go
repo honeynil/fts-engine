@@ -13,28 +13,28 @@ type termExpansion struct {
 	term       string
 	df         uint32
 	fieldStats FieldStats
-	docs       []DocRef
-	byDoc      map[DocID]uint32
+	postings   []Posting
+	byOrd      map[DocOrd]uint32
 }
 
 func (e *termExpansion) buildMap() {
-	if e.byDoc != nil {
+	if e.byOrd != nil {
 		return
 	}
-	e.byDoc = make(map[DocID]uint32, len(e.docs))
-	for _, d := range e.docs {
-		e.byDoc[d.ID] = d.Count
+	e.byOrd = make(map[DocOrd]uint32, len(e.postings))
+	for _, p := range e.postings {
+		e.byOrd[p.Ord] = p.Count
 	}
 }
 
-func (e *termExpansion) lookup(id DocID) (uint32, bool) {
-	if e.byDoc != nil {
-		tf, ok := e.byDoc[id]
+func (e *termExpansion) lookup(ord DocOrd) (uint32, bool) {
+	if e.byOrd != nil {
+		tf, ok := e.byOrd[ord]
 		return tf, ok
 	}
-	for _, d := range e.docs {
-		if d.ID == id {
-			return d.Count, true
+	for _, p := range e.postings {
+		if p.Ord == ord {
+			return p.Count, true
 		}
 	}
 	return 0, false
@@ -42,19 +42,19 @@ func (e *termExpansion) lookup(id DocID) (uint32, bool) {
 
 type fastMust struct {
 	expansions []termExpansion
-	totalDocs  int // sum of len(expansions.docs), a size proxy for ordering
+	totalDocs  int
 }
 
-func (m *fastMust) contains(id DocID) bool {
+func (m *fastMust) contains(ord DocOrd) bool {
 	for i := range m.expansions {
-		if _, ok := m.expansions[i].lookup(id); ok {
+		if _, ok := m.expansions[i].lookup(ord); ok {
 			return true
 		}
 	}
 	return false
 }
 
-func (s *Service) tryExecBooleanAndFast(ctx context.Context, q *BooleanQuery) (map[DocID]docAccum, bool, error) {
+func (s *Service) tryExecBooleanAndFast(ctx context.Context, q *BooleanQuery) (map[DocOrd]docAccum, bool, error) {
 	var mustTerms []TermQuery
 	var shoulds []BoolClause
 	var mustNots []BoolClause
@@ -89,19 +89,19 @@ func (s *Service) tryExecBooleanAndFast(ctx context.Context, q *BooleanQuery) (m
 			return nil, false, err
 		}
 		if fm.totalDocs == 0 {
-			return map[DocID]docAccum{}, true, nil
+			return map[DocOrd]docAccum{}, true, nil
 		}
 		musts = append(musts, fm)
 	}
 
-	exclude := make(map[DocID]struct{})
+	exclude := make(map[DocOrd]struct{})
 	for _, c := range mustNots {
 		child, err := s.executeQuery(ctx, c.Query, 0)
 		if err != nil {
 			return nil, false, err
 		}
-		for id := range child {
-			exclude[id] = struct{}{}
+		for ord := range child {
+			exclude[ord] = struct{}{}
 		}
 	}
 
@@ -122,20 +122,20 @@ func (s *Service) tryExecBooleanAndFast(ctx context.Context, q *BooleanQuery) (m
 		}
 	}
 
-	combined := make(map[DocID]docAccum, driver.totalDocs)
+	combined := make(map[DocOrd]docAccum, driver.totalDocs)
 
 	for di := range driver.expansions {
 		de := &driver.expansions[di]
-		for _, d := range de.docs {
-			if _, already := combined[d.ID]; already {
+		for _, d := range de.postings {
+			if _, already := combined[d.Ord]; already {
 				continue
 			}
-			if _, skip := exclude[d.ID]; skip {
+			if _, skip := exclude[d.Ord]; skip {
 				continue
 			}
 			survives := true
 			for i := range others {
-				if !others[i].contains(d.ID) {
+				if !others[i].contains(d.Ord) {
 					survives = false
 					break
 				}
@@ -149,7 +149,7 @@ func (s *Service) tryExecBooleanAndFast(ctx context.Context, q *BooleanQuery) (m
 			accum.TotalMatches += int(d.Count)
 			if s.scorer != nil {
 				ts := TermStats{Field: de.field, Term: de.term, TF: d.Count, DF: de.df}
-				ds := DocStats{ID: d.ID, Length: s.collection.DocLen(de.field, d.ID)}
+				ds := DocStats{Ord: d.Ord, Length: s.collection.DocLen(de.field, d.Ord)}
 				accum.Score += s.scorer.Score(ts, ds, de.fieldStats)
 			}
 			for dj := range driver.expansions {
@@ -157,11 +157,11 @@ func (s *Service) tryExecBooleanAndFast(ctx context.Context, q *BooleanQuery) (m
 					continue
 				}
 				e2 := &driver.expansions[dj]
-				if tf, ok := e2.lookup(d.ID); ok {
+				if tf, ok := e2.lookup(d.Ord); ok {
 					accum.TotalMatches += int(tf)
 					if s.scorer != nil {
 						ts := TermStats{Field: e2.field, Term: e2.term, TF: tf, DF: e2.df}
-						ds := DocStats{ID: d.ID, Length: s.collection.DocLen(e2.field, d.ID)}
+						ds := DocStats{Ord: d.Ord, Length: s.collection.DocLen(e2.field, d.Ord)}
 						accum.Score += s.scorer.Score(ts, ds, e2.fieldStats)
 					}
 				}
@@ -172,7 +172,7 @@ func (s *Service) tryExecBooleanAndFast(ctx context.Context, q *BooleanQuery) (m
 				matchedAny := false
 				for ej := range others[i].expansions {
 					e := &others[i].expansions[ej]
-					tf, ok := e.lookup(d.ID)
+					tf, ok := e.lookup(d.Ord)
 					if !ok {
 						continue
 					}
@@ -180,7 +180,7 @@ func (s *Service) tryExecBooleanAndFast(ctx context.Context, q *BooleanQuery) (m
 					accum.TotalMatches += int(tf)
 					if s.scorer != nil {
 						ts := TermStats{Field: e.field, Term: e.term, TF: tf, DF: e.df}
-						ds := DocStats{ID: d.ID, Length: s.collection.DocLen(e.field, d.ID)}
+						ds := DocStats{Ord: d.Ord, Length: s.collection.DocLen(e.field, d.Ord)}
 						accum.Score += s.scorer.Score(ts, ds, e.fieldStats)
 					}
 				}
@@ -188,7 +188,7 @@ func (s *Service) tryExecBooleanAndFast(ctx context.Context, q *BooleanQuery) (m
 					accum.UniqueMatches++
 				}
 			}
-			combined[d.ID] = accum
+			combined[d.Ord] = accum
 		}
 	}
 
@@ -197,9 +197,9 @@ func (s *Service) tryExecBooleanAndFast(ctx context.Context, q *BooleanQuery) (m
 		if err != nil {
 			return nil, false, err
 		}
-		for id, h := range child {
-			if existing, ok := combined[id]; ok {
-				combined[id] = addAccum(existing, h)
+		for ord, h := range child {
+			if existing, ok := combined[ord]; ok {
+				combined[ord] = addAccum(existing, h)
 			}
 		}
 	}
@@ -207,7 +207,7 @@ func (s *Service) tryExecBooleanAndFast(ctx context.Context, q *BooleanQuery) (m
 	return combined, true, nil
 }
 
-func (s *Service) tryExecBooleanOrFast(ctx context.Context, q *BooleanQuery) (map[DocID]docAccum, bool, error) {
+func (s *Service) tryExecBooleanOrFast(ctx context.Context, q *BooleanQuery) (map[DocOrd]docAccum, bool, error) {
 	var shouldTerms []TermQuery
 	var mustNots []BoolClause
 	for _, c := range q.Clauses {
@@ -231,14 +231,14 @@ func (s *Service) tryExecBooleanOrFast(ctx context.Context, q *BooleanQuery) (ma
 		return nil, false, nil
 	}
 
-	exclude := make(map[DocID]struct{})
+	exclude := make(map[DocOrd]struct{})
 	for _, c := range mustNots {
 		child, err := s.executeQuery(ctx, c.Query, 0)
 		if err != nil {
 			return nil, false, err
 		}
-		for id := range child {
-			exclude[id] = struct{}{}
+		for ord := range child {
+			exclude[ord] = struct{}{}
 		}
 	}
 
@@ -247,7 +247,7 @@ func (s *Service) tryExecBooleanOrFast(ctx context.Context, q *BooleanQuery) (ma
 		term       string
 		df         uint32
 		fieldStats FieldStats
-		docs       []DocRef
+		postings   []Posting
 		single     bool
 	}
 	plan := make([]resolved, 0, len(shouldTerms))
@@ -291,62 +291,63 @@ func (s *Service) tryExecBooleanOrFast(ctx context.Context, q *BooleanQuery) (ma
 					if s.filter != nil && !s.filter.Contains([]byte(key)) {
 						continue
 					}
-					docs, err := index.Search(key)
+					postings, err := index.Search(key)
 					if err != nil {
 						return nil, false, fmt.Errorf("fts: term query field %q: %w", field, err)
 					}
-					if len(docs) == 0 {
+					postings = s.filterAlivePostings(postings)
+					if len(postings) == 0 {
 						continue
 					}
 					plan = append(plan, resolved{
 						field:      field,
 						term:       token,
-						df:         uint32(len(docs)),
+						df:         uint32(len(postings)),
 						fieldStats: fieldStats,
-						docs:       docs,
+						postings:   postings,
 						single:     singleClause && isSingleKey,
 					})
-					totalCap += len(docs)
+					totalCap += len(postings)
 				}
 			}
 		}
 	}
 
 	if len(plan) == 0 {
-		return map[DocID]docAccum{}, true, nil
+		return map[DocOrd]docAccum{}, true, nil
 	}
 
-	combined := make(map[DocID]docAccum, totalCap)
+	combined := make(map[DocOrd]docAccum, totalCap)
 
-	var seenInClause map[DocID]struct{}
+	var seenInClause map[DocOrd]struct{}
 	var prevIsSingle bool
 	for i, p := range plan {
 		needsSet := !p.single
 		if needsSet && (i == 0 || prevIsSingle) {
-			seenInClause = make(map[DocID]struct{}, len(p.docs))
+			seenInClause = make(map[DocOrd]struct{}, len(p.postings))
 		}
 		prevIsSingle = p.single
 
-		for _, d := range p.docs {
-			if _, skip := exclude[d.ID]; skip {
+		for _, d := range p.postings {
+			if _, skip := exclude[d.Ord]; skip {
 				continue
 			}
-			accum := combined[d.ID]
+			accum := combined[d.Ord]
 			if p.single {
 				accum.UniqueMatches++
 			} else {
-				if _, firstHitInClause := seenInClause[d.ID]; !firstHitInClause {
+				if _, firstHitInClause := seenInClause[d.Ord]; !firstHitInClause {
 					accum.UniqueMatches++
-					seenInClause[d.ID] = struct{}{}
+					seenInClause[d.Ord] = struct{}{}
 				}
 			}
 			accum.TotalMatches += int(d.Count)
 			if s.scorer != nil {
 				ts := TermStats{Field: p.field, Term: p.term, TF: d.Count, DF: p.df}
-				ds := DocStats{ID: d.ID, Length: s.collection.DocLen(p.field, d.ID)}
+				ds := DocStats{Ord: d.Ord, Length: s.collection.DocLen(p.field, d.Ord)}
 				accum.Score += s.scorer.Score(ts, ds, p.fieldStats)
 			}
-			combined[d.ID] = accum
+			combined[d.Ord] = accum
 		}
 	}
 
@@ -365,64 +366,64 @@ func allSingleExpansion(musts []fastMust) bool {
 func (s *Service) execBooleanAndSortMerge(
 	musts []fastMust,
 	shoulds []BoolClause,
-	exclude map[DocID]struct{},
+	exclude map[DocOrd]struct{},
 	ctx context.Context,
-) (map[DocID]docAccum, bool, error) {
+) (map[DocOrd]docAccum, bool, error) {
 	k := len(musts)
 	ptrs := make([]int, k)
 	exps := make([]*termExpansion, k)
 	for i := range musts {
 		exps[i] = &musts[i].expansions[0]
-		if len(exps[i].docs) == 0 {
-			return map[DocID]docAccum{}, true, nil
+		if len(exps[i].postings) == 0 {
+			return map[DocOrd]docAccum{}, true, nil
 		}
 	}
 
-	combined := make(map[DocID]docAccum, len(exps[0].docs))
+	combined := make(map[DocOrd]docAccum, len(exps[0].postings))
 
-	currentSeq := exps[0].docs[0].Seq
+	currentOrd := exps[0].postings[0].Ord
 loop:
 	for {
 
 		for i := 0; i < k; i++ {
-			docs := exps[i].docs
-			for ptrs[i] < len(docs) && docs[ptrs[i]].Seq < currentSeq {
+			postings := exps[i].postings
+			for ptrs[i] < len(postings) && postings[ptrs[i]].Ord < currentOrd {
 				ptrs[i]++
 			}
-			if ptrs[i] >= len(docs) {
+			if ptrs[i] >= len(postings) {
 				break loop
 			}
-			if docs[ptrs[i]].Seq > currentSeq {
-				currentSeq = docs[ptrs[i]].Seq
-				i = -1 // restart the advance sweep
+			if postings[ptrs[i]].Ord > currentOrd {
+				currentOrd = postings[ptrs[i]].Ord
+				i = -1
 				continue
 			}
 		}
 
-		docID := exps[0].docs[ptrs[0]].ID
-		if _, skip := exclude[docID]; !skip {
+		ord := exps[0].postings[ptrs[0]].Ord
+		if _, skip := exclude[ord]; !skip {
 			var accum docAccum
 			for i := range k {
-				d := exps[i].docs[ptrs[i]]
+				d := exps[i].postings[ptrs[i]]
 				accum.UniqueMatches++
 				accum.TotalMatches += int(d.Count)
 				if s.scorer != nil {
 					e := exps[i]
 					ts := TermStats{Field: e.field, Term: e.term, TF: d.Count, DF: e.df}
-					ds := DocStats{ID: docID, Length: s.collection.DocLen(e.field, docID)}
+					ds := DocStats{Ord: ord, Length: s.collection.DocLen(e.field, ord)}
 					accum.Score += s.scorer.Score(ts, ds, e.fieldStats)
 				}
 			}
-			combined[docID] = accum
+			combined[ord] = accum
 		}
 
 		for i := range k {
 			ptrs[i]++
-			if ptrs[i] >= len(exps[i].docs) {
+			if ptrs[i] >= len(exps[i].postings) {
 				break loop
 			}
 		}
-		currentSeq = exps[0].docs[ptrs[0]].Seq
+		currentOrd = exps[0].postings[ptrs[0]].Ord
 	}
 
 	for _, c := range shoulds {
@@ -430,9 +431,9 @@ loop:
 		if err != nil {
 			return nil, false, err
 		}
-		for id, h := range child {
-			if existing, ok := combined[id]; ok {
-				combined[id] = addAccum(existing, h)
+		for ord, h := range child {
+			if existing, ok := combined[ord]; ok {
+				combined[ord] = addAccum(existing, h)
 			}
 		}
 	}
@@ -488,21 +489,22 @@ func (s *Service) collectTermPostings(q TermQuery) (fastMust, error) {
 				if s.filter != nil && !s.filter.Contains([]byte(key)) {
 					continue
 				}
-				docs, err := index.Search(key)
+				postings, err := index.Search(key)
 				if err != nil {
 					return fastMust{}, fmt.Errorf("fts: term query field %q: %w", field, err)
 				}
-				if len(docs) == 0 {
+				postings = s.filterAlivePostings(postings)
+				if len(postings) == 0 {
 					continue
 				}
 				out.expansions = append(out.expansions, termExpansion{
 					field:      field,
 					term:       token,
-					df:         uint32(len(docs)),
+					df:         uint32(len(postings)),
 					fieldStats: fieldStats,
-					docs:       docs,
+					postings:   postings,
 				})
-				out.totalDocs += len(docs)
+				out.totalDocs += len(postings)
 			}
 		}
 	}

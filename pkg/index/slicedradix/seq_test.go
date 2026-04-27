@@ -9,17 +9,17 @@ import (
 	"github.com/dariasmyr/fts-engine/pkg/fts"
 )
 
-func TestSeqAssignedOnFirstInsertion(t *testing.T) {
+func TestOrdAssignedOnFirstInsertion(t *testing.T) {
 	idx := New()
-	_ = idx.Insert("x", "doc-a")
-	_ = idx.Insert("x", "doc-b")
-	_ = idx.Insert("x", "doc-c")
+	_ = idx.Insert("x", 0)
+	_ = idx.Insert("x", 1)
+	_ = idx.Insert("x", 2)
 
 	docs, _ := idx.Search("x")
-	want := []fts.DocRef{
-		{ID: "doc-a", Count: 1, Seq: 0},
-		{ID: "doc-b", Count: 1, Seq: 1},
-		{ID: "doc-c", Count: 1, Seq: 2},
+	want := []fts.Posting{
+		{Ord: 0, Count: 1},
+		{Ord: 1, Count: 1},
+		{Ord: 2, Count: 1},
 	}
 	for i, d := range docs {
 		if d != want[i] {
@@ -28,82 +28,80 @@ func TestSeqAssignedOnFirstInsertion(t *testing.T) {
 	}
 }
 
-func TestSeqStableAcrossTerms(t *testing.T) {
+func TestOrdStableAcrossTerms(t *testing.T) {
 	idx := New()
-	_ = idx.Insert("foo", "doc-a")
-	_ = idx.Insert("bar", "doc-a")
-	_ = idx.Insert("foo", "doc-b")
+	_ = idx.Insert("foo", 0)
+	_ = idx.Insert("bar", 0)
+	_ = idx.Insert("foo", 1)
 
 	foo, _ := idx.Search("foo")
 	bar, _ := idx.Search("bar")
 
-	if foo[0].Seq != bar[0].Seq {
-		t.Fatalf("doc-a has Seq %d in foo but %d in bar", foo[0].Seq, bar[0].Seq)
+	if foo[0].Ord != bar[0].Ord {
+		t.Fatalf("ord-0 has Ord %d in foo but %d in bar", foo[0].Ord, bar[0].Ord)
 	}
-	if foo[0].Seq != 0 || foo[1].Seq != 1 {
-		t.Fatalf("foo Seqs = %d,%d, want 0,1", foo[0].Seq, foo[1].Seq)
+	if foo[0].Ord != 0 || foo[1].Ord != 1 {
+		t.Fatalf("foo Ords = %d,%d, want 0,1", foo[0].Ord, foo[1].Ord)
 	}
 }
 
-// ordinals.
-func TestSeqUnchangedByTailCheck(t *testing.T) {
+func TestOrdUnchangedByTailCheck(t *testing.T) {
 	idx := New()
-	_ = idx.Insert("hotel", "doc-a")
-	_ = idx.Insert("hotel", "doc-a")
-	_ = idx.Insert("hotel", "doc-a")
-	_ = idx.Insert("hotel", "doc-b")
+	_ = idx.Insert("hotel", 0)
+	_ = idx.Insert("hotel", 0)
+	_ = idx.Insert("hotel", 0)
+	_ = idx.Insert("hotel", 1)
 
 	docs, _ := idx.Search("hotel")
 	if len(docs) != 2 {
 		t.Fatalf("len(docs) = %d, want 2", len(docs))
 	}
-	if docs[0].Count != 3 || docs[0].Seq != 0 {
-		t.Fatalf("docs[0] = %+v, want Count=3 Seq=0", docs[0])
+	if docs[0].Count != 3 || docs[0].Ord != 0 {
+		t.Fatalf("docs[0] = %+v, want Count=3 Ord=0", docs[0])
 	}
-	if docs[1].Seq != 1 {
-		t.Fatalf("docs[1].Seq = %d, want 1", docs[1].Seq)
+	if docs[1].Ord != 1 {
+		t.Fatalf("docs[1].Ord = %d, want 1", docs[1].Ord)
 	}
 }
 
-func TestSeqUnchangedByColdPathReindex(t *testing.T) {
+func TestOrdUnchangedByColdPathReindex(t *testing.T) {
 	idx := New()
-	_ = idx.Insert("x", "doc-a")
-	_ = idx.Insert("x", "doc-b")
-	_ = idx.Insert("x", "doc-a")
+	_ = idx.Insert("x", 0)
+	_ = idx.Insert("x", 1)
+	_ = idx.Insert("x", 0)
 
 	docs, _ := idx.Search("x")
 	if len(docs) != 2 {
 		t.Fatalf("len(docs) = %d, want 2", len(docs))
 	}
-	if docs[0].ID != "doc-a" || docs[0].Count != 2 || docs[0].Seq != 0 {
-		t.Fatalf("docs[0] = %+v, want {doc-a Count:2 Seq:0}", docs[0])
+	if docs[0].Ord != 0 || docs[0].Count != 2 {
+		t.Fatalf("docs[0] = %+v, want {Ord:0 Count:2}", docs[0])
 	}
-	if docs[1].Seq != 1 {
-		t.Fatalf("docs[1].Seq = %d, want 1", docs[1].Seq)
+	if docs[1].Ord != 1 {
+		t.Fatalf("docs[1].Ord = %d, want 1", docs[1].Ord)
 	}
 }
 
-func TestSeqMonotonicInPostings(t *testing.T) {
+func TestOrdMonotonicInPostings(t *testing.T) {
 	idx := New()
-	for i, id := range []fts.DocID{"a", "b", "c", "d", "e"} {
-		_ = idx.Insert("t", id)
-		_ = i
+	for o := range []fts.DocOrd{0, 1, 2, 3, 4} {
+		_ = idx.Insert("t", fts.DocOrd(o))
 	}
 	docs, _ := idx.Search("t")
-	var prev uint32
+	var prev fts.DocOrd
 	for i, d := range docs {
-		if i > 0 && d.Seq <= prev {
-			t.Fatalf("postings not Seq-sorted: docs[%d].Seq=%d, prev=%d", i, d.Seq, prev)
+		if i > 0 && d.Ord <= prev {
+			t.Fatalf("postings not Ord-sorted: docs[%d].Ord=%d, prev=%d", i, d.Ord, prev)
 		}
-		prev = d.Seq
+		prev = d.Ord
 	}
 }
 
-func TestSeqSurvivesSerializeLoad(t *testing.T) {
+func TestOrdSurvivesSerializeLoad(t *testing.T) {
 	idx := New()
-	_ = idx.Insert("foo", "doc-a")
-	_ = idx.Insert("foo", "doc-b")
-	_ = idx.Insert("bar", "doc-a")
+	_ = idx.Insert("foo", 0)
+	_ = idx.Insert("foo", 1)
+	_ = idx.Insert("bar", 0)
 
 	var buf bytes.Buffer
 	if err := idx.Serialize(&buf); err != nil {
@@ -116,23 +114,23 @@ func TestSeqSurvivesSerializeLoad(t *testing.T) {
 	loadedIdx := loaded.(*Index)
 	foo, _ := loadedIdx.Search("foo")
 	bar, _ := loadedIdx.Search("bar")
-	if foo[0].Seq != 0 || foo[1].Seq != 1 {
-		t.Fatalf("loaded foo Seqs = %d,%d", foo[0].Seq, foo[1].Seq)
+	if foo[0].Ord != 0 || foo[1].Ord != 1 {
+		t.Fatalf("loaded foo Ords = %d,%d", foo[0].Ord, foo[1].Ord)
 	}
-	if bar[0].Seq != 0 {
-		t.Fatalf("loaded bar[0].Seq = %d, want 0", bar[0].Seq)
+	if bar[0].Ord != 0 {
+		t.Fatalf("loaded bar[0].Ord = %d, want 0", bar[0].Ord)
 	}
 
-	if err := loadedIdx.Insert("foo", "doc-c"); err != nil {
+	if err := loadedIdx.Insert("foo", 2); err != nil {
 		t.Fatalf("Insert post-load: %v", err)
 	}
 	foo2, _ := loadedIdx.Search("foo")
-	if foo2[2].Seq != 2 {
-		t.Fatalf("post-load Seq for doc-c = %d, want 2", foo2[2].Seq)
+	if foo2[2].Ord != 2 {
+		t.Fatalf("post-load Ord for new posting = %d, want 2", foo2[2].Ord)
 	}
 }
 
-func TestSeqConcurrentIndexingIsUnsafe(t *testing.T) {
+func TestConcurrentIndexingIsUnsafe(t *testing.T) {
 	const (
 		goroutines  = 8
 		docsPerG    = 50
@@ -146,10 +144,10 @@ func TestSeqConcurrentIndexingIsUnsafe(t *testing.T) {
 		go func(g int) {
 			defer wg.Done()
 			for d := range docsPerG {
-				docID := fts.DocID(fmt.Sprintf("g%d-d%d", g, d))
+				ord := fts.DocOrd(g*docsPerG + d)
 				for t := range termsPerDoc {
 					term := fmt.Sprintf("term%d", t)
-					_ = idx.Insert(term, docID)
+					_ = idx.Insert(term, ord)
 				}
 			}
 		}(g)
@@ -161,26 +159,23 @@ func TestSeqConcurrentIndexingIsUnsafe(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Search: %v", err)
 		}
-		var prev uint32
+		var prev fts.DocOrd
 		for i, d := range docs {
-			if i > 0 && d.Seq < prev {
-				t.Logf("term%d posting is NOT Seq-sorted at index %d: Seq=%d (prev=%d). "+
-					"This is the expected outcome under concurrent indexing — "+
-					"documented in DocRef.Seq godoc. Single-threaded indexing "+
-					"is the supported mode.", term, i, d.Seq, prev)
+			if i > 0 && d.Ord < prev {
+				t.Logf("term%d posting is NOT Ord-sorted at index %d: Ord=%d (prev=%d). "+
+					"Single-threaded indexing is the supported mode.", term, i, d.Ord, prev)
 				return
 			}
-			prev = d.Seq
+			prev = d.Ord
 		}
 	}
-	t.Log("All postings happened to stay Seq-sorted this run — race didn't " +
-		"surface. Rerun with -count=N to reproduce the interleaving.")
+	t.Log("All postings happened to stay Ord-sorted this run.")
 }
 
 func TestSearchPositionalReturnsSharedSlice(t *testing.T) {
 	idx := New()
-	_ = idx.InsertAt("x", "doc-a", 0)
-	_ = idx.InsertAt("x", "doc-a", 5)
+	_ = idx.InsertAt("x", 1, 0)
+	_ = idx.InsertAt("x", 1, 5)
 
 	refs, err := idx.SearchPositional("x")
 	if err != nil {

@@ -7,59 +7,59 @@ import (
 )
 
 type positionalMemoryIndex struct {
-	postings  map[string][]DocRef
-	positions map[string]map[DocID][]uint32
+	postings  map[string][]Posting
+	positions map[string]map[DocOrd][]uint32
 }
 
 func newPositionalMemoryIndex() *positionalMemoryIndex {
 	return &positionalMemoryIndex{
-		postings:  make(map[string][]DocRef),
-		positions: make(map[string]map[DocID][]uint32),
+		postings:  make(map[string][]Posting),
+		positions: make(map[string]map[DocOrd][]uint32),
 	}
 }
 
-func (p *positionalMemoryIndex) Insert(key string, id DocID) error {
-	p.bumpCount(key, id)
+func (p *positionalMemoryIndex) Insert(key string, ord DocOrd) error {
+	p.bumpCount(key, ord)
 	return nil
 }
 
-func (p *positionalMemoryIndex) InsertAt(key string, id DocID, pos uint32) error {
-	p.bumpCount(key, id)
+func (p *positionalMemoryIndex) InsertAt(key string, ord DocOrd, pos uint32) error {
+	p.bumpCount(key, ord)
 	if _, ok := p.positions[key]; !ok {
-		p.positions[key] = make(map[DocID][]uint32)
+		p.positions[key] = make(map[DocOrd][]uint32)
 	}
-	ps := p.positions[key][id]
+	ps := p.positions[key][ord]
 	ps = append(ps, pos)
 	sort.Slice(ps, func(i, j int) bool { return ps[i] < ps[j] })
-	p.positions[key][id] = ps
+	p.positions[key][ord] = ps
 	return nil
 }
 
-func (p *positionalMemoryIndex) bumpCount(key string, id DocID) {
+func (p *positionalMemoryIndex) bumpCount(key string, ord DocOrd) {
 	entries := p.postings[key]
 	for i := range entries {
-		if entries[i].ID == id {
+		if entries[i].Ord == ord {
 			entries[i].Count++
 			p.postings[key] = entries
 			return
 		}
 	}
-	p.postings[key] = append(entries, DocRef{ID: id, Count: 1})
+	p.postings[key] = append(entries, Posting{Ord: ord, Count: 1})
 }
 
-func (p *positionalMemoryIndex) Search(key string) ([]DocRef, error) {
+func (p *positionalMemoryIndex) Search(key string) ([]Posting, error) {
 	return p.postings[key], nil
 }
 
-func (p *positionalMemoryIndex) SearchPositional(key string) ([]PositionalDocRef, error) {
+func (p *positionalMemoryIndex) SearchPositional(key string) ([]PositionalPosting, error) {
 	entries := p.postings[key]
-	out := make([]PositionalDocRef, 0, len(entries))
+	out := make([]PositionalPosting, 0, len(entries))
 	for _, e := range entries {
 		var positions []uint32
-		if ps, ok := p.positions[key][e.ID]; ok {
+		if ps, ok := p.positions[key][e.Ord]; ok {
 			positions = append([]uint32(nil), ps...)
 		}
-		out = append(out, PositionalDocRef{ID: e.ID, Positions: positions})
+		out = append(out, PositionalPosting{Ord: e.Ord, Positions: positions})
 	}
 	return out, nil
 }
@@ -70,9 +70,9 @@ func TestSearchPhraseMatchesExactOrder(t *testing.T) {
 
 	ctx := context.Background()
 	docs := map[string]string{
-		"doc-a": "barack obama gave a speech",
-		"doc-b": "obama speech today barack was there",
-		"doc-c": "barack obama said barack obama again",
+		"doc-a": "barack obamka gave a speech",
+		"doc-b": "obamka speech today barack was there",
+		"doc-c": "barack obamka said barack obamka again",
 	}
 	for id, content := range docs {
 		if err := svc.IndexDocument(ctx, DocID(id), content); err != nil {
@@ -80,7 +80,7 @@ func TestSearchPhraseMatchesExactOrder(t *testing.T) {
 		}
 	}
 
-	res, err := svc.SearchPhrase(ctx, "barack obama", 10)
+	res, err := svc.SearchPhrase(ctx, "barack obamka", 10)
 	if err != nil {
 		t.Fatalf("SearchPhrase: %v", err)
 	}
@@ -140,11 +140,11 @@ func TestSearchPhraseSkipsNonPositionalIndexes(t *testing.T) {
 	svc := NewMultiField(factory, WordKeys)
 
 	ctx := context.Background()
-	if err := svc.IndexDocument(ctx, "doc-a", "barack obama"); err != nil {
+	if err := svc.IndexDocument(ctx, "doc-a", "barack obamka"); err != nil {
 		t.Fatalf("index: %v", err)
 	}
 
-	res, err := svc.SearchPhrase(ctx, "barack obama", 10)
+	res, err := svc.SearchPhrase(ctx, "barack obamka", 10)
 	if err != nil {
 		t.Fatalf("SearchPhrase: %v", err)
 	}
@@ -161,15 +161,15 @@ func TestSearchPhraseFieldRestrictsToOneField(t *testing.T) {
 	err := svc.Index(ctx, Document{
 		ID: "doc-a",
 		Fields: map[string]Field{
-			"title": {Value: "barack obama"},
-			"body":  {Value: "obama barack speech"},
+			"title": {Value: "barack obamka"},
+			"body":  {Value: "obamka barack speech"},
 		},
 	})
 	if err != nil {
 		t.Fatalf("Index: %v", err)
 	}
 
-	res, err := svc.SearchPhraseField(ctx, "title", "barack obama", 10)
+	res, err := svc.SearchPhraseField(ctx, "title", "barack obamka", 10)
 	if err != nil {
 		t.Fatalf("SearchPhraseField: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestSearchPhraseFieldRestrictsToOneField(t *testing.T) {
 		t.Fatalf("title should match, got %+v", res.Results)
 	}
 
-	res, err = svc.SearchPhraseField(ctx, "body", "barack obama", 10)
+	res, err = svc.SearchPhraseField(ctx, "body", "barack obamka", 10)
 	if err != nil {
 		t.Fatalf("SearchPhraseField: %v", err)
 	}
@@ -192,8 +192,8 @@ func TestSearchPhraseWithBM25Scorer(t *testing.T) {
 
 	ctx := context.Background()
 	docs := map[string]string{
-		"doc-a": "barack obama spoke",
-		"doc-b": "barack obama barack obama repeats",
+		"doc-a": "barack obamka spoke",
+		"doc-b": "barack obamka barack obamka repeats",
 	}
 	for id, content := range docs {
 		if err := svc.IndexDocument(ctx, DocID(id), content); err != nil {
@@ -204,7 +204,7 @@ func TestSearchPhraseWithBM25Scorer(t *testing.T) {
 		_ = svc.IndexDocument(ctx, DocID("noise-"+string(rune('a'+i))), "unrelated content here")
 	}
 
-	res, err := svc.SearchPhrase(ctx, "barack obama", 10)
+	res, err := svc.SearchPhrase(ctx, "barack obamka", 10)
 	if err != nil {
 		t.Fatalf("SearchPhrase: %v", err)
 	}

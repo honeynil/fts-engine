@@ -10,7 +10,7 @@ type TermStats struct {
 }
 
 type DocStats struct {
-	ID     DocID
+	Ord    DocOrd
 	Length uint32
 }
 

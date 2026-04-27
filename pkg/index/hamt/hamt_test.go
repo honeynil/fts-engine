@@ -5,7 +5,7 @@ import "testing"
 func TestIndexInsertAndSearch(t *testing.T) {
 	idx := New()
 
-	if err := idx.Insert("hotel", "doc-1"); err != nil {
+	if err := idx.Insert("hotel", 1); err != nil {
 		t.Fatalf("Insert() error = %v", err)
 	}
 
@@ -16,16 +16,16 @@ func TestIndexInsertAndSearch(t *testing.T) {
 	if len(docs) != 1 {
 		t.Fatalf("len(docs) = %d, want 1", len(docs))
 	}
-	if docs[0].ID != "doc-1" {
-		t.Fatalf("doc ID = %q, want %q", docs[0].ID, "doc-1")
+	if docs[0].Ord != 1 {
+		t.Fatalf("doc Ord = %d, want 1", docs[0].Ord)
 	}
 }
 
 func TestIndexInsertSameDocIncrementsCount(t *testing.T) {
 	idx := New()
 
-	_ = idx.Insert("hotel", "doc-1")
-	_ = idx.Insert("hotel", "doc-1")
+	_ = idx.Insert("hotel", 1)
+	_ = idx.Insert("hotel", 1)
 
 	docs, err := idx.Search("hotel")
 	if err != nil {
@@ -42,8 +42,8 @@ func TestIndexInsertSameDocIncrementsCount(t *testing.T) {
 func TestIndexInsertDifferentDocs(t *testing.T) {
 	idx := New()
 
-	_ = idx.Insert("hotel", "doc-1")
-	_ = idx.Insert("hotel", "doc-2")
+	_ = idx.Insert("hotel", 1)
+	_ = idx.Insert("hotel", 2)
 
 	docs, err := idx.Search("hotel")
 	if err != nil {
@@ -68,7 +68,7 @@ func TestIndexSearchNotFound(t *testing.T) {
 
 func TestIndexAnalyze(t *testing.T) {
 	idx := New()
-	_ = idx.Insert("hotel", "doc-1")
+	_ = idx.Insert("hotel", 1)
 
 	stats := idx.Analyze()
 	if stats.Nodes == 0 {

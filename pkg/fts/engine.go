@@ -18,6 +18,8 @@ type Service struct {
 	filter       Filter
 	scorer       Scorer
 	collection   *collectionStats
+	registry     *DocRegistry
+	deleted      *Tombstones
 
 	mu      sync.RWMutex
 	indexes map[string]Index
@@ -46,6 +48,8 @@ func newService(keyGen KeyGenerator, opts ...Option) *Service {
 		pipeline:   defaultPipeline{},
 		indexes:    make(map[string]Index),
 		collection: newCollectionStats(),
+		registry:   NewDocRegistry(),
+		deleted:    NewTombstones(),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -56,6 +60,40 @@ func newService(keyGen KeyGenerator, opts ...Option) *Service {
 		s.keyGen = WordKeys
 	}
 	return s
+}
+
+// todo:
+func (s *Service) isAlive(ord DocOrd) bool {
+	if s.deleted == nil {
+		return true
+	}
+	return !s.deleted.IsSet(ord)
+}
+
+func (s *Service) filterAlivePostings(in []Posting) []Posting {
+	if s.deleted == nil || !s.deleted.Any() {
+		return in
+	}
+	out := make([]Posting, 0, len(in))
+	for _, p := range in {
+		if !s.deleted.IsSet(p.Ord) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func (s *Service) filterAlivePositional(in []PositionalPosting) []PositionalPosting {
+	if s.deleted == nil || !s.deleted.Any() {
+		return in
+	}
+	out := make([]PositionalPosting, 0, len(in))
+	for _, p := range in {
+		if !s.deleted.IsSet(p.Ord) {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func NewFromReader(r io.Reader, loader IndexLoader, keyGen KeyGenerator, opts ...Option) (*Service, error) {
@@ -80,6 +118,30 @@ func NewMultiFieldFromIndexes(indexes map[string]Index, keyGen KeyGenerator, opt
 	return s
 }
 
+func (s *Service) Registry() *DocRegistry {
+	return s.registry
+}
+
+func (s *Service) Tombstones() *Tombstones {
+	return s.deleted
+}
+
+func WithRegistry(r *DocRegistry) Option {
+	return func(s *Service) {
+		if r != nil {
+			s.registry = r
+		}
+	}
+}
+
+func WithTombstones(t *Tombstones) Option {
+	return func(s *Service) {
+		if t != nil {
+			s.deleted = t
+		}
+	}
+}
+
 func (s *Service) Index(ctx context.Context, doc Document) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -91,8 +153,9 @@ func (s *Service) Index(ctx context.Context, doc Document) error {
 		return fmt.Errorf("fts: document %q has no fields", doc.ID)
 	}
 
+	ord := s.registry.GetOrAssign(doc.ID)
 	for name, field := range doc.Fields {
-		if err := s.indexField(ctx, doc.ID, name, field); err != nil {
+		if err := s.indexField(ctx, doc.ID, ord, name, field); err != nil {
 			return err
 		}
 	}
@@ -107,10 +170,48 @@ func (s *Service) IndexDocument(ctx context.Context, docID DocID, content string
 	if docID == "" {
 		return fmt.Errorf("fts: document id is empty")
 	}
-	return s.indexField(ctx, docID, DefaultField, Field{Value: content})
+	ord := s.registry.GetOrAssign(docID)
+	return s.indexField(ctx, docID, ord, DefaultField, Field{Value: content})
 }
 
-func (s *Service) indexField(ctx context.Context, docID DocID, name string, field Field) error {
+func (s *Service) Delete(ctx context.Context, docID DocID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if docID == "" {
+		return fmt.Errorf("fts: document id is empty")
+	}
+	ord, ok := s.registry.Has(docID)
+	if !ok {
+		return nil
+	}
+	s.deleted.Set(ord)
+	s.collection.forget(ord)
+	s.registry.Forget(docID)
+	return nil
+}
+
+func (s *Service) Update(ctx context.Context, doc Document) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if doc.ID == "" {
+		return fmt.Errorf("fts: document id is empty")
+	}
+	if err := s.Delete(ctx, doc.ID); err != nil {
+		return err
+	}
+	return s.Index(ctx, doc)
+}
+
+func (s *Service) UpdateDocument(ctx context.Context, docID DocID, content string) error {
+	if err := s.Delete(ctx, docID); err != nil {
+		return err
+	}
+	return s.IndexDocument(ctx, docID, content)
+}
+
+func (s *Service) indexField(ctx context.Context, docID DocID, ord DocOrd, name string, field Field) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -128,7 +229,7 @@ func (s *Service) indexField(ctx context.Context, docID DocID, name string, fiel
 	tokens := pipeline.Process(field.Value)
 
 	if s.scorer != nil {
-		s.collection.observe(name, docID, uint32(len(tokens)))
+		s.collection.observe(name, ord, uint32(len(tokens)))
 	}
 
 	positional, hasPositions := index.(PositionalIndex)
@@ -150,11 +251,11 @@ func (s *Service) indexField(ctx context.Context, docID DocID, name string, fiel
 				}
 			}
 			if hasPositions {
-				if err := positional.InsertAt(key, docID, uint32(pos)); err != nil {
+				if err := positional.InsertAt(key, ord, uint32(pos)); err != nil {
 					return fmt.Errorf("fts: index document %q field %q: insert: %w", docID, name, err)
 				}
 			} else {
-				if err := index.Insert(key, docID); err != nil {
+				if err := index.Insert(key, ord); err != nil {
 					return fmt.Errorf("fts: index document %q field %q: insert: %w", docID, name, err)
 				}
 			}
@@ -185,9 +286,9 @@ func (s *Service) searchFields(ctx context.Context, fields []string, query strin
 	timings["preprocess"] = formatDuration(time.Since(preStart))
 
 	searchStart := time.Now()
-	uniqueMatches := make(map[DocID]int)
-	totalMatches := make(map[DocID]int)
-	scores := make(map[DocID]float64)
+	uniqueMatches := make(map[DocOrd]int)
+	totalMatches := make(map[DocOrd]int)
+	scores := make(map[DocOrd]float64)
 
 	for _, field := range fields {
 		s.mu.RLock()
@@ -220,25 +321,26 @@ func (s *Service) searchFields(ctx context.Context, fields []string, query strin
 					continue
 				}
 
-				docs, err := index.Search(key)
+				postings, err := index.Search(key)
 				if err != nil {
 					return nil, fmt.Errorf("fts: search field %q: %w", field, err)
 				}
+				postings = s.filterAlivePostings(postings)
 
 				if s.scorer != nil {
-					df := uint32(len(docs))
-					for _, doc := range docs {
-						uniqueMatches[doc.ID]++
-						totalMatches[doc.ID] += int(doc.Count)
+					df := uint32(len(postings))
+					for _, p := range postings {
+						uniqueMatches[p.Ord]++
+						totalMatches[p.Ord] += int(p.Count)
 
-						ts := TermStats{Field: field, Term: token, TF: doc.Count, DF: df}
-						ds := DocStats{ID: doc.ID, Length: s.collection.DocLen(field, doc.ID)}
-						scores[doc.ID] += s.scorer.Score(ts, ds, fieldStats)
+						ts := TermStats{Field: field, Term: token, TF: p.Count, DF: df}
+						ds := DocStats{Ord: p.Ord, Length: s.collection.DocLen(field, p.Ord)}
+						scores[p.Ord] += s.scorer.Score(ts, ds, fieldStats)
 					}
 				} else {
-					for _, doc := range docs {
-						uniqueMatches[doc.ID]++
-						totalMatches[doc.ID] += int(doc.Count)
+					for _, p := range postings {
+						uniqueMatches[p.Ord]++
+						totalMatches[p.Ord] += int(p.Count)
 					}
 				}
 			}
@@ -248,12 +350,12 @@ func (s *Service) searchFields(ctx context.Context, fields []string, query strin
 	timings["search_tokens"] = formatDuration(time.Since(searchStart))
 
 	results := make([]Result, 0, len(uniqueMatches))
-	for id, unique := range uniqueMatches {
+	for ord, unique := range uniqueMatches {
 		results = append(results, Result{
-			ID:            id,
+			ID:            s.registry.Lookup(ord),
 			UniqueMatches: unique,
-			TotalMatches:  totalMatches[id],
-			Score:         scores[id],
+			TotalMatches:  totalMatches[ord],
+			Score:         scores[ord],
 		})
 	}
 
@@ -320,8 +422,8 @@ func (s *Service) searchPhrase(ctx context.Context, fields []string, phrase stri
 
 	searchStart := time.Now()
 	phraseTerm := strings.Join(tokens, " ")
-	phraseCounts := make(map[DocID]uint32)
-	scores := make(map[DocID]float64)
+	phraseCounts := make(map[DocOrd]uint32)
+	scores := make(map[DocOrd]float64)
 
 	for _, field := range fields {
 		s.mu.RLock()
@@ -335,7 +437,7 @@ func (s *Service) searchPhrase(ctx context.Context, fields []string, phrase stri
 			continue
 		}
 
-		tokenPostings := make([]map[DocID][]uint32, len(tokens))
+		tokenPostings := make([]map[DocOrd][]uint32, len(tokens))
 		skipField := false
 		for i, token := range tokens {
 			if err := ctx.Err(); err != nil {
@@ -346,7 +448,7 @@ func (s *Service) searchPhrase(ctx context.Context, fields []string, phrase stri
 				return nil, fmt.Errorf("fts: phrase search: keygen: %w", err)
 			}
 
-			merged := make(map[DocID][]uint32)
+			merged := make(map[DocOrd][]uint32)
 			for _, key := range keys {
 				if s.filter != nil && !s.filter.Contains([]byte(key)) {
 					continue
@@ -355,14 +457,15 @@ func (s *Service) searchPhrase(ctx context.Context, fields []string, phrase stri
 				if err != nil {
 					return nil, fmt.Errorf("fts: phrase search field %q: %w", field, err)
 				}
+				refs = s.filterAlivePositional(refs)
 				for _, r := range refs {
 					if len(r.Positions) == 0 {
 						continue
 					}
-					if existing, ok := merged[r.ID]; ok {
-						merged[r.ID] = mergeSortedPositions(existing, r.Positions)
+					if existing, ok := merged[r.Ord]; ok {
+						merged[r.Ord] = mergeSortedPositions(existing, r.Positions)
 					} else {
-						merged[r.ID] = append([]uint32(nil), r.Positions...)
+						merged[r.Ord] = append([]uint32(nil), r.Positions...)
 					}
 				}
 			}
@@ -376,11 +479,11 @@ func (s *Service) searchPhrase(ctx context.Context, fields []string, phrase stri
 			continue
 		}
 
-		fieldCounts := make(map[DocID]uint32)
-		for docID, startPositions := range tokenPostings[0] {
+		fieldCounts := make(map[DocOrd]uint32)
+		for ord, startPositions := range tokenPostings[0] {
 			missing := false
 			for i := 1; i < len(tokens); i++ {
-				if _, found := tokenPostings[i][docID]; !found {
+				if _, found := tokenPostings[i][ord]; !found {
 					missing = true
 					break
 				}
@@ -393,7 +496,7 @@ func (s *Service) searchPhrase(ctx context.Context, fields []string, phrase stri
 			for _, p := range startPositions {
 				aligned := true
 				for i := 1; i < len(tokens); i++ {
-					if !containsSortedUint32(tokenPostings[i][docID], p+uint32(i)) {
+					if !containsSortedUint32(tokenPostings[i][ord], p+uint32(i)) {
 						aligned = false
 						break
 					}
@@ -403,7 +506,7 @@ func (s *Service) searchPhrase(ctx context.Context, fields []string, phrase stri
 				}
 			}
 			if matches > 0 {
-				fieldCounts[docID] = matches
+				fieldCounts[ord] = matches
 			}
 		}
 
@@ -419,12 +522,12 @@ func (s *Service) searchPhrase(ctx context.Context, fields []string, phrase stri
 			}
 		}
 		df := uint32(len(fieldCounts))
-		for docID, cnt := range fieldCounts {
-			phraseCounts[docID] += cnt
+		for ord, cnt := range fieldCounts {
+			phraseCounts[ord] += cnt
 			if s.scorer != nil {
 				ts := TermStats{Field: field, Term: phraseTerm, TF: cnt, DF: df}
-				ds := DocStats{ID: docID, Length: s.collection.DocLen(field, docID)}
-				scores[docID] += s.scorer.Score(ts, ds, fieldStats)
+				ds := DocStats{Ord: ord, Length: s.collection.DocLen(field, ord)}
+				scores[ord] += s.scorer.Score(ts, ds, fieldStats)
 			}
 		}
 	}
@@ -432,12 +535,12 @@ func (s *Service) searchPhrase(ctx context.Context, fields []string, phrase stri
 	timings["search_tokens"] = formatDuration(time.Since(searchStart))
 
 	results := make([]Result, 0, len(phraseCounts))
-	for id, cnt := range phraseCounts {
+	for ord, cnt := range phraseCounts {
 		results = append(results, Result{
-			ID:            id,
+			ID:            s.registry.Lookup(ord),
 			UniqueMatches: 1,
 			TotalMatches:  int(cnt),
-			Score:         scores[id],
+			Score:         scores[ord],
 		})
 	}
 
@@ -474,6 +577,7 @@ func (s *Service) searchPhrase(ctx context.Context, fields []string, phrase stri
 func containsSortedUint32(s []uint32, v uint32) bool {
 	lo, hi := 0, len(s)
 	for lo < hi {
+		// kto lohi?
 		mid := int(uint(lo+hi) >> 1)
 		if s[mid] < v {
 			lo = mid + 1

@@ -11,7 +11,7 @@ func (s *Service) execBooleanOrWand(
 	ctx context.Context,
 	q *BooleanQuery,
 	topK int,
-) (map[DocID]docAccum, bool, error) {
+) (map[DocOrd]docAccum, bool, error) {
 
 	if topK <= 0 {
 		return nil, false, nil
@@ -61,7 +61,7 @@ func (s *Service) execBooleanOrWand(
 		})
 	}
 	if len(clauses) == 0 {
-		return map[DocID]docAccum{}, true, nil
+		return map[DocOrd]docAccum{}, true, nil
 	}
 
 	h := &topKHeap{}
@@ -80,7 +80,7 @@ func (s *Service) execBooleanOrWand(
 		}
 
 		sort.Slice(clauses, func(i, j int) bool {
-			return clauses[i].currentSeq() < clauses[j].currentSeq()
+			return clauses[i].currentOrd() < clauses[j].currentOrd()
 		})
 
 		pivot := -1
@@ -96,24 +96,24 @@ func (s *Service) execBooleanOrWand(
 			break
 		}
 
-		pivotSeq := clauses[pivot].currentSeq()
+		pivotOrd := clauses[pivot].currentOrd()
 
-		if clauses[0].currentSeq() == pivotSeq {
+		if clauses[0].currentOrd() == pivotOrd {
 			var accum docAccum
-			matchedDocID := clauses[0].currentDocID()
+			matchedOrd := clauses[0].currentOrd()
 			for _, c := range clauses {
-				if c.currentSeq() != pivotSeq {
+				if c.currentOrd() != pivotOrd {
 					continue
 				}
-				d := c.currentDoc()
+				d := c.currentPosting()
 				accum.UniqueMatches++
 				accum.TotalMatches += int(d.Count)
 				ts := TermStats{Field: c.exp.field, Term: c.exp.term, TF: d.Count, DF: c.exp.df}
-				ds := DocStats{ID: matchedDocID, Length: s.collection.DocLen(c.exp.field, matchedDocID)}
+				ds := DocStats{Ord: matchedOrd, Length: s.collection.DocLen(c.exp.field, matchedOrd)}
 				accum.Score += s.scorer.Score(ts, ds, c.exp.fieldStats)
 			}
 			if accum.Score > theta || h.Len() < topK {
-				heap.Push(h, wandHit{id: matchedDocID, accum: accum})
+				heap.Push(h, wandHit{ord: matchedOrd, accum: accum})
 				if h.Len() > topK {
 					heap.Pop(h)
 				}
@@ -122,7 +122,7 @@ func (s *Service) execBooleanOrWand(
 				}
 			}
 			for _, c := range clauses {
-				if c.currentSeq() == pivotSeq {
+				if c.currentOrd() == pivotOrd {
 					c.cursor++
 				}
 			}
@@ -130,8 +130,8 @@ func (s *Service) execBooleanOrWand(
 
 			for i := 0; i <= pivot; i++ {
 				c := clauses[i]
-				if c.currentSeq() < pivotSeq {
-					for c.cursor < len(c.exp.docs) && c.exp.docs[c.cursor].Seq < pivotSeq {
+				if c.currentOrd() < pivotOrd {
+					for c.cursor < len(c.exp.postings) && c.exp.postings[c.cursor].Ord < pivotOrd {
 						c.cursor++
 					}
 					break
@@ -140,9 +140,9 @@ func (s *Service) execBooleanOrWand(
 		}
 	}
 
-	out := make(map[DocID]docAccum, h.Len())
+	out := make(map[DocOrd]docAccum, h.Len())
 	for _, hit := range *h {
-		out[hit.id] = hit.accum
+		out[hit.ord] = hit.accum
 	}
 	return out, true, nil
 }
@@ -153,10 +153,9 @@ type wandClause struct {
 	cursor int
 }
 
-func (c *wandClause) currentDoc() DocRef  { return c.exp.docs[c.cursor] }
-func (c *wandClause) currentSeq() uint32  { return c.exp.docs[c.cursor].Seq }
-func (c *wandClause) currentDocID() DocID { return c.exp.docs[c.cursor].ID }
-func (c *wandClause) exhausted() bool     { return c.cursor >= len(c.exp.docs) }
+func (c *wandClause) currentPosting() Posting { return c.exp.postings[c.cursor] }
+func (c *wandClause) currentOrd() DocOrd      { return c.exp.postings[c.cursor].Ord }
+func (c *wandClause) exhausted() bool         { return c.cursor >= len(c.exp.postings) }
 
 func compactClauses(cs []*wandClause) []*wandClause {
 	out := cs[:0]
@@ -173,9 +172,9 @@ func clauseUpperBound(exp *termExpansion, s *Service) float64 {
 		return math.Inf(1)
 	}
 	var maxTF uint32
-	for i := range exp.docs {
-		if exp.docs[i].Count > maxTF {
-			maxTF = exp.docs[i].Count
+	for i := range exp.postings {
+		if exp.postings[i].Count > maxTF {
+			maxTF = exp.postings[i].Count
 		}
 	}
 	if maxTF == 0 {
@@ -183,12 +182,12 @@ func clauseUpperBound(exp *termExpansion, s *Service) float64 {
 	}
 
 	ts := TermStats{Field: exp.field, Term: exp.term, TF: maxTF, DF: exp.df}
-	ds := DocStats{ID: "", Length: 1}
+	ds := DocStats{Ord: 0, Length: 1}
 	return s.scorer.Score(ts, ds, exp.fieldStats)
 }
 
 type wandHit struct {
-	id    DocID
+	ord   DocOrd
 	accum docAccum
 }
 

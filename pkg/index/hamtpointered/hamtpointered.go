@@ -26,8 +26,8 @@ type terminalNode struct {
 }
 
 type entry struct {
-	key  string
-	docs []fts.DocRef
+	Key  string
+	Docs []fts.Posting
 }
 
 type Index struct {
@@ -142,25 +142,25 @@ func (n *node) appendChild(newChild any, mask uint32, pos int) {
 	n.children = append(n.children[:pos], append([]any{newChild}, n.children[pos:]...)...)
 }
 
-func (n *node) insertNode(hash uint32, key string, docID fts.DocID, level int) {
+func (n *node) insertNode(hash uint32, key string, ord fts.DocOrd, level int) {
 	child, pos, mask := n.nextNode(hash, level)
 
 	if level == depth {
 		if child == nil {
-			tn := &terminalNode{entries: []entry{{key: key, docs: []fts.DocRef{{ID: docID, Count: 1}}}}}
+			tn := &terminalNode{entries: []entry{{Key: key, Docs: []fts.Posting{{Ord: ord, Count: 1}}}}}
 			n.appendChild(tn, mask, pos)
 			return
 		}
 
 		t := child.(*terminalNode)
 		for i := range t.entries {
-			if key == t.entries[i].key {
-				addDoc(&t.entries[i].docs, docID)
+			if key == t.entries[i].Key {
+				addDoc(&t.entries[i].Docs, ord)
 				return
 			}
 		}
 
-		t.entries = append(t.entries, entry{key: key, docs: []fts.DocRef{{ID: docID, Count: 1}}})
+		t.entries = append(t.entries, entry{Key: key, Docs: []fts.Posting{{Ord: ord, Count: 1}}})
 		return
 	}
 
@@ -170,27 +170,27 @@ func (n *node) insertNode(hash uint32, key string, docID fts.DocID, level int) {
 		child = newChild
 	}
 
-	child.(*node).insertNode(hash, key, docID, level+1)
+	child.(*node).insertNode(hash, key, ord, level+1)
 }
 
-func addDoc(docs *[]fts.DocRef, docID fts.DocID) {
+func addDoc(docs *[]fts.Posting, ord fts.DocOrd) {
 	for i := range *docs {
-		if (*docs)[i].ID == docID {
+		if (*docs)[i].Ord == ord {
 			(*docs)[i].Count++
 			return
 		}
 	}
-	*docs = append(*docs, fts.DocRef{ID: docID, Count: 1})
+	*docs = append(*docs, fts.Posting{Ord: ord, Count: 1})
 }
 
-func (t *Index) Insert(word string, docID fts.DocID) error {
+func (t *Index) Insert(word string, ord fts.DocOrd) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.root.insertNode(hashKey(word), word, docID, 0)
+	t.root.insertNode(hashKey(word), word, ord, 0)
 	return nil
 }
 
-func (t *Index) Search(word string) ([]fts.DocRef, error) {
+func (t *Index) Search(word string) ([]fts.Posting, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
@@ -206,8 +206,8 @@ func (t *Index) Search(word string) ([]fts.DocRef, error) {
 		if level == depth {
 			term := child.(*terminalNode)
 			for i := range term.entries {
-				if word == term.entries[i].key {
-					return term.entries[i].docs, nil
+				if word == term.entries[i].Key {
+					return term.entries[i].Docs, nil
 				}
 			}
 			return nil, nil
@@ -245,7 +245,7 @@ func (t *Index) Analyze() fts.Stats {
 		case *terminalNode:
 			s.Leaves++
 			for i := range node.entries {
-				s.TotalDocs += len(node.entries[i].docs)
+				s.TotalDocs += len(node.entries[i].Docs)
 			}
 		}
 	}

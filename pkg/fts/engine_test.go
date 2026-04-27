@@ -7,29 +7,33 @@ import (
 )
 
 type memoryIndex struct {
-	entries map[string][]DocRef
+	entries map[string][]Posting
 	inserts []struct {
 		key string
-		id  DocID
+		ord DocOrd
 	}
 	searches []string
 }
 
 func newMemoryIndex() *memoryIndex {
-	return &memoryIndex{entries: make(map[string][]DocRef)}
+	return &memoryIndex{entries: make(map[string][]Posting)}
 }
 
-func (m *memoryIndex) Insert(key string, id DocID) error {
+func (m *memoryIndex) Insert(key string, ord DocOrd) error {
 	m.inserts = append(m.inserts, struct {
 		key string
-		id  DocID
-	}{key: key, id: id})
+		ord DocOrd
+	}{key: key, ord: ord})
 	return nil
 }
 
-func (m *memoryIndex) Search(key string) ([]DocRef, error) {
+func (m *memoryIndex) Search(key string) ([]Posting, error) {
 	m.searches = append(m.searches, key)
 	return m.entries[key], nil
+}
+
+func docPosting(svc *Service, id DocID, count uint32) Posting {
+	return Posting{Ord: svc.Registry().GetOrAssign(id), Count: count}
 }
 
 type containsOnlyFilter struct {
@@ -60,10 +64,9 @@ func (f *buildableContainsFilter) Build() error {
 
 func TestSearchDocumentsSortAndLimit(t *testing.T) {
 	idx := newMemoryIndex()
-	idx.entries["alpha"] = []DocRef{{ID: "a", Count: 3}, {ID: "b", Count: 1}}
-	idx.entries["beta"] = []DocRef{{ID: "a", Count: 1}, {ID: "c", Count: 5}}
-
 	svc := New(idx, WordKeys)
+	idx.entries["alpha"] = []Posting{docPosting(svc, "a", 3), docPosting(svc, "b", 1)}
+	idx.entries["beta"] = []Posting{docPosting(svc, "a", 1), docPosting(svc, "c", 5)}
 
 	res, err := svc.SearchDocuments(context.Background(), "alpha beta", 2)
 	if err != nil {
@@ -87,9 +90,8 @@ func TestSearchDocumentsSortAndLimit(t *testing.T) {
 
 func TestSearchDocumentsTieBreakerByID(t *testing.T) {
 	idx := newMemoryIndex()
-	idx.entries["token"] = []DocRef{{ID: "z", Count: 2}, {ID: "b", Count: 2}}
-
 	svc := New(idx, WordKeys)
+	idx.entries["token"] = []Posting{docPosting(svc, "z", 2), docPosting(svc, "b", 2)}
 
 	res, err := svc.SearchDocuments(context.Background(), "token", 10)
 	if err != nil {
@@ -107,9 +109,8 @@ func TestSearchDocumentsTieBreakerByID(t *testing.T) {
 
 func TestSearchDocumentsReturnsTimings(t *testing.T) {
 	idx := newMemoryIndex()
-	idx.entries["one"] = []DocRef{{ID: "x", Count: 1}}
-
 	svc := New(idx, WordKeys)
+	idx.entries["one"] = []Posting{docPosting(svc, "x", 1)}
 
 	res, err := svc.SearchDocuments(context.Background(), "one", 1)
 	if err != nil {
@@ -173,11 +174,10 @@ func TestContextCancellation(t *testing.T) {
 
 func TestSearchDocumentsSkipsIndexWhenFilterMisses(t *testing.T) {
 	idx := newMemoryIndex()
-	idx.entries["known"] = []DocRef{{ID: "doc", Count: 1}}
-
 	svc := New(idx, WordKeys, WithFilter(containsOnlyFilter{
 		allowed: map[string]bool{"known": true},
 	}))
+	idx.entries["known"] = []Posting{docPosting(svc, "doc", 1)}
 
 	res, err := svc.SearchDocuments(context.Background(), "unknown", 10)
 	if err != nil {
@@ -195,13 +195,12 @@ func TestSearchDocumentsSkipsIndexWhenFilterMisses(t *testing.T) {
 
 func TestSearchDocumentsDoesNotAutoBuildBuildableFilter(t *testing.T) {
 	idx := newMemoryIndex()
-	idx.entries["known"] = []DocRef{{ID: "doc", Count: 1}}
-
 	filter := &buildableContainsFilter{
 		containsOnlyFilter: containsOnlyFilter{allowed: map[string]bool{"known": true}},
 	}
 
 	svc := New(idx, WordKeys, WithFilter(filter))
+	idx.entries["known"] = []Posting{docPosting(svc, "doc", 1)}
 
 	if _, err := svc.SearchDocuments(context.Background(), "known", 10); err != nil {
 		t.Fatalf("SearchDocuments() error = %v", err)
@@ -214,12 +213,12 @@ func TestSearchDocumentsDoesNotAutoBuildBuildableFilter(t *testing.T) {
 
 func TestSearchUsesBufferedStaticFilterAfterManualBuild(t *testing.T) {
 	idx := newMemoryIndex()
-	idx.entries["known"] = []DocRef{{ID: "doc", Count: 1}}
 
 	static := &testStaticFilter{}
 	filter := NewBufferedStaticFilter(static)
 
 	svc := New(idx, WordKeys, WithFilter(filter))
+	idx.entries["known"] = []Posting{docPosting(svc, "doc", 1)}
 
 	if err := svc.IndexDocument(context.Background(), "doc-1", "known"); err != nil {
 		t.Fatalf("IndexDocument() error = %v", err)

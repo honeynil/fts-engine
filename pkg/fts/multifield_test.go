@@ -70,9 +70,7 @@ func TestSingleFieldServiceRejectsOtherFields(t *testing.T) {
 
 func TestSearchDocumentsORAcrossFields(t *testing.T) {
 	titleIdx := newMemoryIndex()
-	titleIdx.entries["alpha"] = []DocRef{{ID: "a", Count: 2}}
 	bodyIdx := newMemoryIndex()
-	bodyIdx.entries["beta"] = []DocRef{{ID: "b", Count: 3}, {ID: "a", Count: 1}}
 
 	factory := func(name string) (Index, error) {
 		switch name {
@@ -84,6 +82,9 @@ func TestSearchDocumentsORAcrossFields(t *testing.T) {
 		return nil, fmt.Errorf("unexpected field %q", name)
 	}
 	svc := NewMultiField(factory, WordKeys)
+
+	titleIdx.entries["alpha"] = []Posting{docPosting(svc, "a", 2)}
+	bodyIdx.entries["beta"] = []Posting{docPosting(svc, "b", 3), docPosting(svc, "a", 1)}
 
 	if err := svc.Index(context.Background(), Document{ID: "seed", Fields: map[string]Field{
 		"title": {Value: "alpha"},
@@ -112,9 +113,7 @@ func TestSearchDocumentsORAcrossFields(t *testing.T) {
 
 func TestSearchFieldRestrictsToOneField(t *testing.T) {
 	titleIdx := newMemoryIndex()
-	titleIdx.entries["alpha"] = []DocRef{{ID: "a", Count: 1}}
 	bodyIdx := newMemoryIndex()
-	bodyIdx.entries["alpha"] = []DocRef{{ID: "b", Count: 1}}
 
 	factory := func(name string) (Index, error) {
 		switch name {
@@ -126,6 +125,8 @@ func TestSearchFieldRestrictsToOneField(t *testing.T) {
 		return nil, fmt.Errorf("unexpected field %q", name)
 	}
 	svc := NewMultiField(factory, WordKeys)
+	titleIdx.entries["alpha"] = []Posting{docPosting(svc, "a", 1)}
+	bodyIdx.entries["alpha"] = []Posting{docPosting(svc, "b", 1)}
 	_ = svc.Index(context.Background(), Document{ID: "seed", Fields: map[string]Field{
 		"title": {Value: "alpha"},
 		"body":  {Value: "alpha"},
@@ -197,14 +198,18 @@ func TestIndexEmptyDocumentRejected(t *testing.T) {
 
 func TestNewMultiFieldFromIndexes(t *testing.T) {
 	title := newMemoryIndex()
-	title.entries["alpha"] = []DocRef{{ID: "a", Count: 1}}
 	body := newMemoryIndex()
-	body.entries["beta"] = []DocRef{{ID: "b", Count: 1}}
+
+	registry := NewDocRegistry()
+	aOrd := registry.GetOrAssign("a")
+	bOrd := registry.GetOrAssign("b")
+	title.entries["alpha"] = []Posting{{Ord: aOrd, Count: 1}}
+	body.entries["beta"] = []Posting{{Ord: bOrd, Count: 1}}
 
 	svc := NewMultiFieldFromIndexes(map[string]Index{
 		"title": title,
 		"body":  body,
-	}, WordKeys)
+	}, WordKeys, WithRegistry(registry))
 
 	got := svc.Fields()
 	if len(got) != 2 {
@@ -216,7 +221,6 @@ func TestNewMultiFieldFromIndexes(t *testing.T) {
 		t.Fatalf("SearchField title: err=%v, res=%+v", err, res)
 	}
 
-	// Factory from NewMultiFieldFromIndexes errors for unknown fields.
 	err = svc.Index(context.Background(), Document{
 		ID:     "x",
 		Fields: map[string]Field{"new_field": {Value: "z"}},

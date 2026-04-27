@@ -41,9 +41,9 @@ func (s *Service) Search(ctx context.Context, q Query, maxResults int) (*SearchR
 	timings["search_tokens"] = formatDuration(time.Since(searchStart))
 
 	results := make([]Result, 0, len(hits))
-	for id, h := range hits {
+	for ord, h := range hits {
 		results = append(results, Result{
-			ID:            id,
+			ID:            s.registry.Lookup(ord),
 			UniqueMatches: h.UniqueMatches,
 			TotalMatches:  h.TotalMatches,
 			Score:         h.Score,
@@ -83,7 +83,7 @@ func (s *Service) Search(ctx context.Context, q Query, maxResults int) (*SearchR
 	}, nil
 }
 
-func (s *Service) executeQuery(ctx context.Context, q Query, topK int) (map[DocID]docAccum, error) {
+func (s *Service) executeQuery(ctx context.Context, q Query, topK int) (map[DocOrd]docAccum, error) {
 	switch t := q.(type) {
 	case TermQuery:
 		return s.execTerm(ctx, t)
@@ -111,17 +111,17 @@ func (s *Service) resolveFields(explicit string) []string {
 	return s.fieldNames()
 }
 
-func (s *Service) execTerm(ctx context.Context, q TermQuery) (map[DocID]docAccum, error) {
+func (s *Service) execTerm(ctx context.Context, q TermQuery) (map[DocOrd]docAccum, error) {
 	if q.Term == "" {
-		return map[DocID]docAccum{}, nil
+		return map[DocOrd]docAccum{}, nil
 	}
 
 	tokens := s.pipeline.Process(q.Term)
 	if len(tokens) == 0 {
-		return map[DocID]docAccum{}, nil
+		return map[DocOrd]docAccum{}, nil
 	}
 
-	var hits map[DocID]docAccum
+	var hits map[DocOrd]docAccum
 
 	for _, field := range s.resolveFields(q.Field) {
 		s.mu.RLock()
@@ -153,45 +153,46 @@ func (s *Service) execTerm(ctx context.Context, q TermQuery) (map[DocID]docAccum
 				if s.filter != nil && !s.filter.Contains([]byte(key)) {
 					continue
 				}
-				docs, err := index.Search(key)
+				postings, err := index.Search(key)
 				if err != nil {
 					return nil, fmt.Errorf("fts: term query field %q: %w", field, err)
 				}
+				postings = s.filterAlivePostings(postings)
 				if hits == nil {
-					hits = make(map[DocID]docAccum, len(docs))
+					hits = make(map[DocOrd]docAccum, len(postings))
 				}
-				df := uint32(len(docs))
-				for _, doc := range docs {
-					accum := hits[doc.ID]
+				df := uint32(len(postings))
+				for _, p := range postings {
+					accum := hits[p.Ord]
 					accum.UniqueMatches++
-					accum.TotalMatches += int(doc.Count)
+					accum.TotalMatches += int(p.Count)
 					if s.scorer != nil {
-						ts := TermStats{Field: field, Term: token, TF: doc.Count, DF: df}
-						ds := DocStats{ID: doc.ID, Length: s.collection.DocLen(field, doc.ID)}
+						ts := TermStats{Field: field, Term: token, TF: p.Count, DF: df}
+						ds := DocStats{Ord: p.Ord, Length: s.collection.DocLen(field, p.Ord)}
 						accum.Score += s.scorer.Score(ts, ds, fieldStats)
 					}
-					hits[doc.ID] = accum
+					hits[p.Ord] = accum
 				}
 			}
 		}
 	}
 	if hits == nil {
-		hits = map[DocID]docAccum{}
+		hits = map[DocOrd]docAccum{}
 	}
 	return hits, nil
 }
 
-func (s *Service) execPhrase(ctx context.Context, q PhraseQuery) (map[DocID]docAccum, error) {
+func (s *Service) execPhrase(ctx context.Context, q PhraseQuery) (map[DocOrd]docAccum, error) {
 	tokens := s.pipeline.Process(q.Phrase)
 	if len(tokens) == 0 {
-		return map[DocID]docAccum{}, nil
+		return map[DocOrd]docAccum{}, nil
 	}
 	if len(tokens) == 1 {
 		return s.execTerm(ctx, TermQuery{Field: q.Field, Term: tokens[0]})
 	}
 
 	phraseTerm := strings.Join(tokens, " ")
-	hits := make(map[DocID]docAccum)
+	hits := make(map[DocOrd]docAccum)
 
 	for _, field := range s.resolveFields(q.Field) {
 		s.mu.RLock()
@@ -205,7 +206,7 @@ func (s *Service) execPhrase(ctx context.Context, q PhraseQuery) (map[DocID]docA
 			continue
 		}
 
-		tokenPostings := make([]map[DocID][]uint32, len(tokens))
+		tokenPostings := make([]map[DocOrd][]uint32, len(tokens))
 		skip := false
 		for i, token := range tokens {
 			if err := ctx.Err(); err != nil {
@@ -215,7 +216,7 @@ func (s *Service) execPhrase(ctx context.Context, q PhraseQuery) (map[DocID]docA
 			if err != nil {
 				return nil, fmt.Errorf("fts: phrase query: keygen: %w", err)
 			}
-			var merged map[DocID][]uint32
+			var merged map[DocOrd][]uint32
 			if len(keys) == 1 {
 				if s.filter != nil && !s.filter.Contains([]byte(keys[0])) {
 					merged = nil
@@ -224,15 +225,16 @@ func (s *Service) execPhrase(ctx context.Context, q PhraseQuery) (map[DocID]docA
 					if err != nil {
 						return nil, fmt.Errorf("fts: phrase query field %q: %w", field, err)
 					}
-					merged = make(map[DocID][]uint32, len(refs))
+					refs = s.filterAlivePositional(refs)
+					merged = make(map[DocOrd][]uint32, len(refs))
 					for _, r := range refs {
 						if len(r.Positions) > 0 {
-							merged[r.ID] = r.Positions
+							merged[r.Ord] = r.Positions
 						}
 					}
 				}
 			} else {
-				merged = make(map[DocID][]uint32)
+				merged = make(map[DocOrd][]uint32)
 				for _, key := range keys {
 					if s.filter != nil && !s.filter.Contains([]byte(key)) {
 						continue
@@ -241,14 +243,15 @@ func (s *Service) execPhrase(ctx context.Context, q PhraseQuery) (map[DocID]docA
 					if err != nil {
 						return nil, fmt.Errorf("fts: phrase query field %q: %w", field, err)
 					}
+					refs = s.filterAlivePositional(refs)
 					for _, r := range refs {
 						if len(r.Positions) == 0 {
 							continue
 						}
-						if existing, ok := merged[r.ID]; ok {
-							merged[r.ID] = mergeSortedPositions(existing, r.Positions)
+						if existing, ok := merged[r.Ord]; ok {
+							merged[r.Ord] = mergeSortedPositions(existing, r.Positions)
 						} else {
-							merged[r.ID] = append([]uint32(nil), r.Positions...)
+							merged[r.Ord] = append([]uint32(nil), r.Positions...)
 						}
 					}
 				}
@@ -270,14 +273,14 @@ func (s *Service) execPhrase(ctx context.Context, q PhraseQuery) (map[DocID]docA
 			}
 		}
 
-		fieldCounts := make(map[DocID]uint32)
-		for docID, driverPositions := range tokenPostings[driverIdx] {
+		fieldCounts := make(map[DocOrd]uint32)
+		for ord, driverPositions := range tokenPostings[driverIdx] {
 			missing := false
 			for i := range tokens {
 				if i == driverIdx {
 					continue
 				}
-				if _, ok := tokenPostings[i][docID]; !ok {
+				if _, ok := tokenPostings[i][ord]; !ok {
 					missing = true
 					break
 				}
@@ -285,9 +288,9 @@ func (s *Service) execPhrase(ctx context.Context, q PhraseQuery) (map[DocID]docA
 			if missing {
 				continue
 			}
-			matches := phraseAlign(tokenPostings, docID, driverIdx, driverPositions)
+			matches := phraseAlign(tokenPostings, ord, driverIdx, driverPositions)
 			if matches > 0 {
-				fieldCounts[docID] = matches
+				fieldCounts[ord] = matches
 			}
 		}
 		if len(fieldCounts) == 0 {
@@ -302,27 +305,27 @@ func (s *Service) execPhrase(ctx context.Context, q PhraseQuery) (map[DocID]docA
 			}
 		}
 		df := uint32(len(fieldCounts))
-		for docID, cnt := range fieldCounts {
-			accum := hits[docID]
+		for ord, cnt := range fieldCounts {
+			accum := hits[ord]
 			accum.UniqueMatches++
 			accum.TotalMatches += int(cnt)
 			if s.scorer != nil {
 				ts := TermStats{Field: field, Term: phraseTerm, TF: cnt, DF: df}
-				ds := DocStats{ID: docID, Length: s.collection.DocLen(field, docID)}
+				ds := DocStats{Ord: ord, Length: s.collection.DocLen(field, ord)}
 				accum.Score += s.scorer.Score(ts, ds, fieldStats)
 			}
-			hits[docID] = accum
+			hits[ord] = accum
 		}
 	}
 	return hits, nil
 }
 
-func (s *Service) execPrefix(ctx context.Context, q PrefixQuery) (map[DocID]docAccum, error) {
+func (s *Service) execPrefix(ctx context.Context, q PrefixQuery) (map[DocOrd]docAccum, error) {
 	if q.Prefix == "" {
-		return map[DocID]docAccum{}, nil
+		return map[DocOrd]docAccum{}, nil
 	}
 
-	hits := make(map[DocID]docAccum)
+	hits := make(map[DocOrd]docAccum)
 	for _, field := range s.resolveFields(q.Field) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -338,11 +341,12 @@ func (s *Service) execPrefix(ctx context.Context, q PrefixQuery) (map[DocID]docA
 			continue
 		}
 
-		docs, err := prefixer.SearchPrefix(q.Prefix)
+		postings, err := prefixer.SearchPrefix(q.Prefix)
 		if err != nil {
 			return nil, fmt.Errorf("fts: prefix query field %q: %w", field, err)
 		}
-		if len(docs) == 0 {
+		postings = s.filterAlivePostings(postings)
+		if len(postings) == 0 {
 			continue
 		}
 
@@ -353,26 +357,26 @@ func (s *Service) execPrefix(ctx context.Context, q PrefixQuery) (map[DocID]docA
 				AvgLength: s.collection.AvgDocLen(field),
 			}
 		}
-		df := uint32(len(docs))
-		for _, doc := range docs {
-			accum := hits[doc.ID]
+		df := uint32(len(postings))
+		for _, p := range postings {
+			accum := hits[p.Ord]
 			accum.UniqueMatches++
-			accum.TotalMatches += int(doc.Count)
+			accum.TotalMatches += int(p.Count)
 			if s.scorer != nil {
-				ts := TermStats{Field: field, Term: q.Prefix + "*", TF: doc.Count, DF: df}
-				ds := DocStats{ID: doc.ID, Length: s.collection.DocLen(field, doc.ID)}
+				ts := TermStats{Field: field, Term: q.Prefix + "*", TF: p.Count, DF: df}
+				ds := DocStats{Ord: p.Ord, Length: s.collection.DocLen(field, p.Ord)}
 				accum.Score += s.scorer.Score(ts, ds, fieldStats)
 			}
-			hits[doc.ID] = accum
+			hits[p.Ord] = accum
 		}
 	}
 	return hits, nil
 }
 
-func (s *Service) execBoolean(ctx context.Context, q *BooleanQuery, topK int) (map[DocID]docAccum, error) {
+func (s *Service) execBoolean(ctx context.Context, q *BooleanQuery, topK int) (map[DocOrd]docAccum, error) {
 
 	if q == nil || len(q.Clauses) == 0 {
-		return map[DocID]docAccum{}, nil
+		return map[DocOrd]docAccum{}, nil
 	}
 
 	if res, ok, err := s.tryExecBooleanAndFast(ctx, q); err != nil {
@@ -393,9 +397,9 @@ func (s *Service) execBoolean(ctx context.Context, q *BooleanQuery, topK int) (m
 		return res, nil
 	}
 
-	var musts []map[DocID]docAccum
-	var shoulds []map[DocID]docAccum
-	exclude := make(map[DocID]struct{})
+	var musts []map[DocOrd]docAccum
+	var shoulds []map[DocOrd]docAccum
+	exclude := make(map[DocOrd]struct{})
 
 	for _, c := range q.Clauses {
 		if err := ctx.Err(); err != nil {
@@ -414,24 +418,24 @@ func (s *Service) execBoolean(ctx context.Context, q *BooleanQuery, topK int) (m
 		case Should:
 			shoulds = append(shoulds, child)
 		case MustNot:
-			for id := range child {
-				exclude[id] = struct{}{}
+			for ord := range child {
+				exclude[ord] = struct{}{}
 			}
 		}
 	}
 
-	combined := make(map[DocID]docAccum)
+	combined := make(map[DocOrd]docAccum)
 
 	if len(musts) > 0 {
 		sort.Slice(musts, func(i, j int) bool { return len(musts[i]) < len(musts[j]) })
-		for id, h := range musts[0] {
-			if _, skip := exclude[id]; skip {
+		for ord, h := range musts[0] {
+			if _, skip := exclude[ord]; skip {
 				continue
 			}
 			accum := h
 			ok := true
 			for _, other := range musts[1:] {
-				oh, found := other[id]
+				oh, found := other[ord]
 				if !found {
 					ok = false
 					break
@@ -439,23 +443,23 @@ func (s *Service) execBoolean(ctx context.Context, q *BooleanQuery, topK int) (m
 				accum = addAccum(accum, oh)
 			}
 			if ok {
-				combined[id] = accum
+				combined[ord] = accum
 			}
 		}
 		for _, sh := range shoulds {
-			for id, h := range sh {
-				if existing, ok := combined[id]; ok {
-					combined[id] = addAccum(existing, h)
+			for ord, h := range sh {
+				if existing, ok := combined[ord]; ok {
+					combined[ord] = addAccum(existing, h)
 				}
 			}
 		}
 	} else {
 		for _, sh := range shoulds {
-			for id, h := range sh {
-				if _, skip := exclude[id]; skip {
+			for ord, h := range sh {
+				if _, skip := exclude[ord]; skip {
 					continue
 				}
-				combined[id] = addAccum(combined[id], h)
+				combined[ord] = addAccum(combined[ord], h)
 			}
 		}
 	}
@@ -463,7 +467,7 @@ func (s *Service) execBoolean(ctx context.Context, q *BooleanQuery, topK int) (m
 	return combined, nil
 }
 
-func phraseAlign(tokenPostings []map[DocID][]uint32, docID DocID, driverIdx int, driverPositions []uint32) uint32 {
+func phraseAlign(tokenPostings []map[DocOrd][]uint32, ord DocOrd, driverIdx int, driverPositions []uint32) uint32 {
 	n := len(tokenPostings)
 	if n == 0 {
 		return 0
@@ -474,7 +478,7 @@ func phraseAlign(tokenPostings []map[DocID][]uint32, docID DocID, driverIdx int,
 		if i == driverIdx {
 			continue
 		}
-		others[i] = tokenPostings[i][docID]
+		others[i] = tokenPostings[i][ord]
 		if len(others[i]) == 0 {
 			return 0
 		}
@@ -498,7 +502,7 @@ outer:
 			}
 			ptrs[i] = j
 			if j >= len(pos) {
-				return matches // this token exhausted; no more phrase hits possible
+				return matches
 			}
 			if pos[j] != target {
 				continue outer

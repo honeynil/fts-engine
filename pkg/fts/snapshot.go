@@ -9,8 +9,8 @@ import (
 	"sync"
 )
 
-const snapshotVersion uint16 = 1
-const multiIndexSnapshotVersion uint16 = 2
+const snapshotVersion uint16 = 2
+const multiIndexSnapshotVersion uint16 = 3
 
 type IndexSnapshotSaver func(index Index, w io.Writer) error
 type IndexSnapshotLoader func(r io.Reader) (Index, error)
@@ -19,12 +19,16 @@ type FilterSnapshotSaver func(filter Filter, w io.Writer) error
 type FilterSnapshotLoader func(r io.Reader) (Filter, error)
 
 type LoadedIndexSnapshot struct {
-	IndexName string
-	Index     Index
+	IndexName  string
+	Index      Index
+	Registry   *DocRegistry
+	Tombstones *Tombstones
 }
 
 type LoadedMultiIndexSnapshot struct {
-	Fields map[string]LoadedIndexSnapshot
+	Fields     map[string]LoadedIndexSnapshot
+	Registry   *DocRegistry
+	Tombstones *Tombstones
 }
 
 type LoadedFilterSnapshot struct {
@@ -36,6 +40,8 @@ type indexEnvelope struct {
 	Version      uint16
 	IndexName    string
 	IndexPayload []byte
+	Registry     []DocID
+	Tombstones   []uint64
 }
 
 type multiIndexField struct {
@@ -45,8 +51,10 @@ type multiIndexField struct {
 }
 
 type multiIndexEnvelope struct {
-	Version uint16
-	Fields  []multiIndexField
+	Version    uint16
+	Fields     []multiIndexField
+	Registry   []DocID
+	Tombstones []uint64
 }
 
 type filterEnvelope struct {
@@ -115,7 +123,11 @@ func RegisterFilterSnapshotCodec(name string, saver FilterSnapshotSaver, loader 
 	return nil
 }
 
-func SaveIndexSnapshot(w io.Writer, indexName string, index Index) error {
+func SaveIndexSnapshot(w io.Writer, indexName string, index Index, registry *DocRegistry) error {
+	return SaveIndexSnapshotWithTombstones(w, indexName, index, registry, nil)
+}
+
+func SaveIndexSnapshotWithTombstones(w io.Writer, indexName string, index Index, registry *DocRegistry, tombstones *Tombstones) error {
 	if w == nil {
 		return fmt.Errorf("fts: save index snapshot: nil writer")
 	}
@@ -140,6 +152,12 @@ func SaveIndexSnapshot(w io.Writer, indexName string, index Index) error {
 		Version:      snapshotVersion,
 		IndexName:    indexName,
 		IndexPayload: indexPayload.Bytes(),
+	}
+	if registry != nil {
+		envelope.Registry = registry.Snapshot()
+	}
+	if tombstones != nil && tombstones.Any() {
+		envelope.Tombstones = tombstones.Snapshot()
 	}
 
 	if err := gob.NewEncoder(w).Encode(envelope); err != nil {
@@ -176,10 +194,21 @@ func LoadIndexSnapshot(r io.Reader) (*LoadedIndexSnapshot, error) {
 		return nil, fmt.Errorf("fts: load index snapshot: decode index %q: %w", envelope.IndexName, err)
 	}
 
-	return &LoadedIndexSnapshot{IndexName: envelope.IndexName, Index: index}, nil
+	out := &LoadedIndexSnapshot{IndexName: envelope.IndexName, Index: index}
+	if len(envelope.Registry) > 0 {
+		out.Registry = RestoreDocRegistry(envelope.Registry)
+	}
+	if len(envelope.Tombstones) > 0 {
+		out.Tombstones = RestoreTombstones(envelope.Tombstones)
+	}
+	return out, nil
 }
 
-func SaveMultiIndexSnapshot(w io.Writer, fieldCodecs map[string]string, indexes map[string]Index) error {
+func SaveMultiIndexSnapshot(w io.Writer, fieldCodecs map[string]string, indexes map[string]Index, registry *DocRegistry) error {
+	return SaveMultiIndexSnapshotWithTombstones(w, fieldCodecs, indexes, registry, nil)
+}
+
+func SaveMultiIndexSnapshotWithTombstones(w io.Writer, fieldCodecs map[string]string, indexes map[string]Index, registry *DocRegistry, tombstones *Tombstones) error {
 	if w == nil {
 		return fmt.Errorf("fts: save multi-index snapshot: nil writer")
 	}
@@ -226,6 +255,12 @@ func SaveMultiIndexSnapshot(w io.Writer, fieldCodecs map[string]string, indexes 
 		Version: multiIndexSnapshotVersion,
 		Fields:  fields,
 	}
+	if registry != nil {
+		envelope.Registry = registry.Snapshot()
+	}
+	if tombstones != nil && tombstones.Any() {
+		envelope.Tombstones = tombstones.Snapshot()
+	}
 
 	if err := gob.NewEncoder(w).Encode(envelope); err != nil {
 		return fmt.Errorf("fts: save multi-index snapshot: encode envelope: %w", err)
@@ -267,6 +302,12 @@ func LoadMultiIndexSnapshot(r io.Reader) (*LoadedMultiIndexSnapshot, error) {
 		}
 
 		out.Fields[f.FieldName] = LoadedIndexSnapshot{IndexName: f.IndexName, Index: idx}
+	}
+	if len(envelope.Registry) > 0 {
+		out.Registry = RestoreDocRegistry(envelope.Registry)
+	}
+	if len(envelope.Tombstones) > 0 {
+		out.Tombstones = RestoreTombstones(envelope.Tombstones)
 	}
 	return out, nil
 }

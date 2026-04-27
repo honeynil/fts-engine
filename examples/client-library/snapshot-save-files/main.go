@@ -51,7 +51,7 @@ func main() {
 	}
 	defer filterFile.Close()
 
-	if err := fts.SaveIndexSnapshot(indexFile, "radix", index); err != nil {
+	if err := fts.SaveIndexSnapshot(indexFile, "radix", index, svc.Registry()); err != nil {
 		panic(err)
 	}
 	if err := fts.SaveFilterSnapshot(filterFile, "bloom", searchFilter); err != nil {

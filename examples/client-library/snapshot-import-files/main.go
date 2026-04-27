@@ -37,7 +37,11 @@ func main() {
 		panic(err)
 	}
 
-	restored := fts.New(loadedIndex.Index, keygen.Word, fts.WithFilter(loadedFilter.Filter))
+	opts := []fts.Option{fts.WithFilter(loadedFilter.Filter)}
+	if loadedIndex.Registry != nil {
+		opts = append(opts, fts.WithRegistry(loadedIndex.Registry))
+	}
+	restored := fts.New(loadedIndex.Index, keygen.Word, opts...)
 	res, err := restored.SearchDocuments(context.Background(), "snapshot", 10)
 	if err != nil {
 		panic(err)

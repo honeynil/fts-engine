@@ -4,34 +4,51 @@ import "sync"
 
 type collectionStats struct {
 	mu       sync.RWMutex
-	docsSeen map[DocID]struct{}
-	docLen   map[string]map[DocID]uint32
+	docsSeen map[DocOrd]struct{}
+	docLen   map[string]map[DocOrd]uint32
 	totalLen map[string]uint64
 }
 
 func newCollectionStats() *collectionStats {
 	return &collectionStats{
-		docsSeen: make(map[DocID]struct{}),
-		docLen:   make(map[string]map[DocID]uint32),
+		docsSeen: make(map[DocOrd]struct{}),
+		docLen:   make(map[string]map[DocOrd]uint32),
 		totalLen: make(map[string]uint64),
 	}
 }
 
-func (c *collectionStats) observe(field string, id DocID, tokens uint32) {
+func (c *collectionStats) observe(field string, ord DocOrd, tokens uint32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if _, seen := c.docsSeen[id]; !seen {
-		c.docsSeen[id] = struct{}{}
+	if _, seen := c.docsSeen[ord]; !seen {
+		c.docsSeen[ord] = struct{}{}
 	}
 
 	perField, ok := c.docLen[field]
 	if !ok {
-		perField = make(map[DocID]uint32)
+		perField = make(map[DocOrd]uint32)
 		c.docLen[field] = perField
 	}
-	perField[id] += tokens
+	perField[ord] += tokens
 	c.totalLen[field] += uint64(tokens)
+}
+
+func (c *collectionStats) forget(ord DocOrd) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, seen := c.docsSeen[ord]; !seen {
+		return
+	}
+	delete(c.docsSeen, ord)
+
+	for field, perField := range c.docLen {
+		if length, ok := perField[ord]; ok {
+			c.totalLen[field] -= uint64(length)
+			delete(perField, ord)
+		}
+	}
 }
 
 func (c *collectionStats) TotalDocs() int {
@@ -40,11 +57,11 @@ func (c *collectionStats) TotalDocs() int {
 	return len(c.docsSeen)
 }
 
-func (c *collectionStats) DocLen(field string, id DocID) uint32 {
+func (c *collectionStats) DocLen(field string, ord DocOrd) uint32 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if m, ok := c.docLen[field]; ok {
-		return m[id]
+		return m[ord]
 	}
 	return 0
 }

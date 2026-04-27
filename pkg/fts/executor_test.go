@@ -13,23 +13,23 @@ func newPrefixMemoryIndex() *prefixMemoryIndex {
 	return &prefixMemoryIndex{positionalMemoryIndex: newPositionalMemoryIndex()}
 }
 
-func (p *prefixMemoryIndex) SearchPrefix(prefix string) ([]DocRef, error) {
-	aggregated := make(map[DocID]uint32)
-	var order []DocID
+func (p *prefixMemoryIndex) SearchPrefix(prefix string) ([]Posting, error) {
+	aggregated := make(map[DocOrd]uint32)
+	var order []DocOrd
 	for key, refs := range p.postings {
 		if len(key) < len(prefix) || key[:len(prefix)] != prefix {
 			continue
 		}
 		for _, r := range refs {
-			if _, seen := aggregated[r.ID]; !seen {
-				order = append(order, r.ID)
+			if _, seen := aggregated[r.Ord]; !seen {
+				order = append(order, r.Ord)
 			}
-			aggregated[r.ID] += r.Count
+			aggregated[r.Ord] += r.Count
 		}
 	}
-	out := make([]DocRef, 0, len(order))
-	for _, id := range order {
-		out = append(out, DocRef{ID: id, Count: aggregated[id]})
+	out := make([]Posting, 0, len(order))
+	for _, ord := range order {
+		out = append(out, Posting{Ord: ord, Count: aggregated[ord]})
 	}
 	return out, nil
 }

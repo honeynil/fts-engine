@@ -400,6 +400,9 @@ func tryLoadSplitSnapshot(log *slog.Logger, cfg *config.Config, keyGen pkgfts.Ke
 		}
 	}
 
+	if loadedIndex.Registry != nil {
+		builtOpts = append(builtOpts, pkgfts.WithRegistry(loadedIndex.Registry))
+	}
 	svc := pkgfts.New(loadedIndex.Index, keyGen, builtOpts...)
 	log.Info("Loaded split FTS snapshots", "index_path", indexPath, "filter_path", filterPath)
 	return svc, true, nil
@@ -443,7 +446,7 @@ func saveSplitSnapshots(log *slog.Logger, cfg *config.Config, svc *pkgfts.Servic
 	}
 
 	if err := ftspersist.SaveAtomicWithOptions(indexPath, opts, func(w io.Writer) error {
-		return pkgfts.SaveIndexSnapshot(w, indexName, index)
+		return pkgfts.SaveIndexSnapshot(w, indexName, index, svc.Registry())
 	}); err != nil {
 		return err
 	}

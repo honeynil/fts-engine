@@ -18,23 +18,23 @@ const (
 	depth     = 7
 )
 
-type documents []fts.DocRef
+type postings []fts.Posting
 
-func (d documents) Add(id fts.DocID) documents {
-	i := sort.Search(len(d), func(i int) bool { return d[i].ID >= id })
-	if i < len(d) && d[i].ID == id {
+func (d postings) Add(ord fts.DocOrd) postings {
+	i := sort.Search(len(d), func(i int) bool { return d[i].Ord >= ord })
+	if i < len(d) && d[i].Ord == ord {
 		d[i].Count++
 		return d
 	}
-	d = append(d, fts.DocRef{})
+	d = append(d, fts.Posting{})
 	copy(d[i+1:], d[i:])
-	d[i] = fts.DocRef{ID: id, Count: 1}
+	d[i] = fts.Posting{Ord: ord, Count: 1}
 	return d
 }
 
 type entry struct {
 	key  string
-	docs documents
+	docs postings
 }
 
 type nodeptr = uint32
@@ -43,18 +43,18 @@ type terminal struct {
 	entries []entry
 }
 
-func (t *terminal) Append(word string, id fts.DocID) {
+func (t *terminal) Append(word string, ord fts.DocOrd) {
 	i := sort.Search(len(t.entries), func(i int) bool { return t.entries[i].key >= word })
 	if i < len(t.entries) && t.entries[i].key == word {
-		t.entries[i].docs = t.entries[i].docs.Add(id)
+		t.entries[i].docs = t.entries[i].docs.Add(ord)
 		return
 	}
 	t.entries = append(t.entries, entry{})
 	copy(t.entries[i+1:], t.entries[i:])
-	t.entries[i] = entry{key: word, docs: documents{{ID: id, Count: 1}}}
+	t.entries[i] = entry{key: word, docs: postings{{Ord: ord, Count: 1}}}
 }
 
-func (t *terminal) Find(word string) documents {
+func (t *terminal) Find(word string) postings {
 	i := sort.Search(len(t.entries), func(i int) bool { return t.entries[i].key >= word })
 	if i < len(t.entries) && t.entries[i].key == word {
 		return t.entries[i].docs
@@ -82,8 +82,8 @@ type Index struct {
 }
 
 type snapshotEntry struct {
-	Key  string
-	Docs []fts.DocRef
+	Key      string
+	Postings []fts.Posting
 }
 
 type snapshotTerminal struct {
@@ -125,7 +125,7 @@ func (t *Index) Serialize(w io.Writer) error {
 		term := t.terms[i]
 		entries := make([]snapshotEntry, 0, len(term.entries))
 		for _, e := range term.entries {
-			entries = append(entries, snapshotEntry{Key: e.key, Docs: append([]fts.DocRef(nil), e.docs...)})
+			entries = append(entries, snapshotEntry{Key: e.key, Postings: append([]fts.Posting(nil), e.docs...)})
 		}
 		snap.Terms = append(snap.Terms, snapshotTerminal{Entries: entries})
 	}
@@ -160,7 +160,7 @@ func Load(r io.Reader) (fts.Index, error) {
 		s := snap.Terms[i]
 		entries := make([]entry, 0, len(s.Entries))
 		for _, e := range s.Entries {
-			entries = append(entries, entry{key: e.Key, docs: append([]fts.DocRef(nil), e.Docs...)})
+			entries = append(entries, entry{key: e.Key, docs: append(postings(nil), e.Postings...)})
 		}
 		idx.terms = append(idx.terms, terminal{entries: entries})
 	}
@@ -172,7 +172,7 @@ func Load(r io.Reader) (fts.Index, error) {
 	return idx, nil
 }
 
-func (t *Index) Search(key string) ([]fts.DocRef, error) {
+func (t *Index) Search(key string) ([]fts.Posting, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
@@ -200,7 +200,7 @@ func (t *Index) Search(key string) ([]fts.DocRef, error) {
 	return docs, nil
 }
 
-func (t *Index) Insert(word string, id fts.DocID) error {
+func (t *Index) Insert(word string, ord fts.DocOrd) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -223,7 +223,7 @@ func (t *Index) Insert(word string, id fts.DocID) error {
 		t.nodes[n] = t.nodes[n].Append(hash&lowerbits, termPtr)
 	}
 
-	t.terms[termPtr].Append(word, id)
+	t.terms[termPtr].Append(word, ord)
 	return nil
 }
 

@@ -10,28 +10,28 @@ import (
 )
 
 type snapshotIndex struct {
-	data map[string][]DocRef
+	data map[string][]Posting
 }
 
 func newSnapshotIndex() *snapshotIndex {
-	return &snapshotIndex{data: make(map[string][]DocRef)}
+	return &snapshotIndex{data: make(map[string][]Posting)}
 }
 
-func (m *snapshotIndex) Insert(key string, id DocID) error {
+func (m *snapshotIndex) Insert(key string, ord DocOrd) error {
 	rows := m.data[key]
 	for i := range rows {
-		if rows[i].ID == id {
+		if rows[i].Ord == ord {
 			rows[i].Count++
 			m.data[key] = rows
 			return nil
 		}
 	}
-	m.data[key] = append(rows, DocRef{ID: id, Count: 1})
+	m.data[key] = append(rows, Posting{Ord: ord, Count: 1})
 	return nil
 }
 
-func (m *snapshotIndex) Search(key string) ([]DocRef, error) {
-	return append([]DocRef(nil), m.data[key]...), nil
+func (m *snapshotIndex) Search(key string) ([]Posting, error) {
+	return append([]Posting(nil), m.data[key]...), nil
 }
 
 func (m *snapshotIndex) Serialize(w io.Writer) error {
@@ -107,7 +107,7 @@ func TestSaveLoadSplitSnapshotsRoundTrip(t *testing.T) {
 	index, searchFilter := svc.SnapshotComponents()
 
 	var indexSnap bytes.Buffer
-	if err := SaveIndexSnapshot(&indexSnap, indexCodecName, index); err != nil {
+	if err := SaveIndexSnapshot(&indexSnap, indexCodecName, index, svc.Registry()); err != nil {
 		t.Fatalf("SaveIndexSnapshot() error = %v", err)
 	}
 
@@ -126,7 +126,7 @@ func TestSaveLoadSplitSnapshotsRoundTrip(t *testing.T) {
 		t.Fatalf("LoadFilterSnapshot() error = %v", err)
 	}
 
-	reloaded := New(loadedIndex.Index, WordKeys, WithFilter(loadedFilter.Filter))
+	reloaded := New(loadedIndex.Index, WordKeys, WithFilter(loadedFilter.Filter), WithRegistry(loadedIndex.Registry))
 
 	res, err := reloaded.SearchDocuments(context.Background(), "alpha", 10)
 	if err != nil {
@@ -140,7 +140,7 @@ func TestSaveLoadSplitSnapshotsRoundTrip(t *testing.T) {
 
 func TestSaveIndexSnapshotUnknownCodec(t *testing.T) {
 	var snap bytes.Buffer
-	err := SaveIndexSnapshot(&snap, "unknown", newSnapshotIndex())
+	err := SaveIndexSnapshot(&snap, "unknown", newSnapshotIndex(), nil)
 	if err == nil {
 		t.Fatal("SaveIndexSnapshot() error = nil, want non-nil")
 	}
@@ -163,7 +163,7 @@ func TestSaveIndexSnapshotWritesPayload(t *testing.T) {
 	index, _ := svc.SnapshotComponents()
 
 	var out bytes.Buffer
-	if err := SaveIndexSnapshot(&out, indexCodecName, index); err != nil {
+	if err := SaveIndexSnapshot(&out, indexCodecName, index, svc.Registry()); err != nil {
 		t.Fatalf("SaveIndexSnapshot() error = %v", err)
 	}
 	if out.Len() == 0 {
@@ -201,7 +201,7 @@ func TestSaveLoadMultiIndexSnapshotRoundTrip(t *testing.T) {
 	codecs := map[string]string{"title": codecName, "body": codecName}
 
 	var buf bytes.Buffer
-	if err := SaveMultiIndexSnapshot(&buf, codecs, indexes); err != nil {
+	if err := SaveMultiIndexSnapshot(&buf, codecs, indexes, svc.Registry()); err != nil {
 		t.Fatalf("SaveMultiIndexSnapshot() error = %v", err)
 	}
 	if buf.Len() == 0 {
@@ -224,7 +224,7 @@ func TestSaveLoadMultiIndexSnapshotRoundTrip(t *testing.T) {
 		restoredIndexes[name] = entry.Index
 	}
 
-	restored := NewMultiFieldFromIndexes(restoredIndexes, WordKeys)
+	restored := NewMultiFieldFromIndexes(restoredIndexes, WordKeys, WithRegistry(loaded.Registry))
 
 	res, err := restored.SearchField(context.Background(), "title", "rosa", 10)
 	if err != nil {

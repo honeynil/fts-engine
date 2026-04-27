@@ -6,11 +6,16 @@ import (
 )
 
 type DocID string
+type DocOrd uint32
 
-type DocRef struct {
-	ID    DocID
+type Posting struct {
+	Ord   DocOrd
 	Count uint32
-	Seq   uint32
+}
+
+type PositionalPosting struct {
+	Ord       DocOrd
+	Positions []uint32
 }
 
 type Result struct {
@@ -39,24 +44,19 @@ type Field struct {
 }
 
 type Index interface {
-	Insert(key string, id DocID) error
-	Search(key string) ([]DocRef, error)
-}
-
-type PositionalDocRef struct {
-	ID        DocID
-	Positions []uint32
+	Insert(key string, ord DocOrd) error
+	Search(key string) ([]Posting, error)
 }
 
 type PositionalIndex interface {
 	Index
-	InsertAt(key string, id DocID, position uint32) error
-	SearchPositional(key string) ([]PositionalDocRef, error)
+	InsertAt(key string, ord DocOrd, position uint32) error
+	SearchPositional(key string) ([]PositionalPosting, error)
 }
 
 type PrefixIndex interface {
 	Index
-	SearchPrefix(prefix string) ([]DocRef, error)
+	SearchPrefix(prefix string) ([]Posting, error)
 }
 
 type IndexFactory func(fieldName string) (Index, error)

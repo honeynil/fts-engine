@@ -10,7 +10,7 @@ func TestBM25RareTermScoresHigherThanCommon(t *testing.T) {
 	scorer := BM25()
 
 	fieldStats := FieldStats{N: 1000, AvgLength: 20}
-	doc := DocStats{ID: "d", Length: 20}
+	doc := DocStats{Ord: 0, Length: 20}
 
 	rare := scorer.Score(TermStats{Term: "rosa", TF: 1, DF: 3}, doc, fieldStats)
 	common := scorer.Score(TermStats{Term: "the", TF: 1, DF: 900}, doc, fieldStats)
@@ -25,8 +25,8 @@ func TestBM25LengthNormalization(t *testing.T) {
 	fieldStats := FieldStats{N: 100, AvgLength: 50}
 	term := TermStats{Term: "x", TF: 2, DF: 10}
 
-	short := scorer.Score(term, DocStats{ID: "s", Length: 10}, fieldStats)
-	long := scorer.Score(term, DocStats{ID: "l", Length: 200}, fieldStats)
+	short := scorer.Score(term, DocStats{Ord: 0, Length: 10}, fieldStats)
+	long := scorer.Score(term, DocStats{Ord: 1, Length: 200}, fieldStats)
 
 	if short <= long {
 		t.Fatalf("BM25: expected short doc > long doc (same TF), got short=%v long=%v", short, long)
@@ -92,8 +92,8 @@ func TestSearchWithBM25RanksByRareness(t *testing.T) {
 
 func TestSearchScoreIsZeroWithoutScorer(t *testing.T) {
 	idx := newMemoryIndex()
-	idx.entries["alpha"] = []DocRef{{ID: "a", Count: 1}}
 	svc := New(idx, WordKeys)
+	idx.entries["alpha"] = []Posting{docPosting(svc, "a", 1)}
 
 	res, err := svc.SearchDocuments(context.Background(), "alpha", 10)
 	if err != nil {
@@ -132,7 +132,8 @@ func TestCollectionStatsTracksPerFieldLength(t *testing.T) {
 	if got := svc.collection.AvgDocLen("title"); math.Abs(got-wantAvgTitle) > 1e-9 {
 		t.Fatalf("AvgDocLen(title): want %v, got %v", wantAvgTitle, got)
 	}
-	if got := svc.collection.DocLen("title", "d1"); got != 2 {
+	d1Ord, _ := svc.Registry().Has("d1")
+	if got := svc.collection.DocLen("title", d1Ord); got != 2 {
 		t.Fatalf("DocLen(title, d1): want 2, got %d", got)
 	}
 	if got := svc.collection.TotalDocs(); got != 2 {

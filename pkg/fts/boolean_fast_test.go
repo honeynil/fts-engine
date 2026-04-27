@@ -19,12 +19,12 @@ func buildSvcSliced(t *testing.T, scored bool) *fts.Service {
 	svc := fts.New(slicedradix.New(), fts.WordKeys, opts...)
 	ctx := context.Background()
 	corpus := map[string]string{
-		"doc-a": "barack obama gave a speech at inauguration",
+		"doc-a": "barack obamka gave a speech at inauguration",
 		"doc-b": "banana split dessert is barack tasty",
 		"doc-c": "russia is a country barack visited it",
 		"doc-d": "mars rover exploration barack likes space",
 		"doc-e": "the quick brown fox jumps over lazy dogs",
-		"doc-f": "obama russia meeting in moscow photo op",
+		"doc-f": "obamka russia meeting in moscow photo op",
 	}
 	ids := make([]string, 0, len(corpus))
 	for id := range corpus {
@@ -179,7 +179,7 @@ func TestWandMatchesEagerScores(t *testing.T) {
 	svc := buildSvcSliced(t, true)
 	q := &fts.BooleanQuery{Clauses: []fts.BoolClause{
 		fts.ShouldClause(fts.TermQuery{Term: "barack"}),
-		fts.ShouldClause(fts.TermQuery{Term: "obama"}),
+		fts.ShouldClause(fts.TermQuery{Term: "obamka"}),
 	}}
 	full, err := svc.Search(context.Background(), q, 100)
 	if err != nil {

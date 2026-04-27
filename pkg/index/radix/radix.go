@@ -12,13 +12,13 @@ type node struct {
 	terminal bool
 	prefix   string
 	children []*node
-	docs     map[fts.DocID]uint32
+	docs     map[fts.DocOrd]uint32
 }
 
 func newNode(prefix string) *node {
 	return &node{
 		prefix: prefix,
-		docs:   make(map[fts.DocID]uint32),
+		docs:   make(map[fts.DocOrd]uint32),
 	}
 }
 
@@ -30,7 +30,7 @@ type Index struct {
 type snapshotNode struct {
 	Terminal bool
 	Prefix   string
-	Docs     []fts.DocRef
+	Postings []fts.Posting
 	Children []snapshotNode
 }
 
@@ -70,7 +70,7 @@ func encodeNode(n *node) snapshotNode {
 	snap := snapshotNode{
 		Terminal: n.terminal,
 		Prefix:   n.prefix,
-		Docs:     collectDocs(n.docs),
+		Postings: collectPostings(n.docs),
 		Children: make([]snapshotNode, 0, len(n.children)),
 	}
 
@@ -84,8 +84,8 @@ func encodeNode(n *node) snapshotNode {
 func decodeNode(s snapshotNode) *node {
 	n := newNode(s.Prefix)
 	n.terminal = s.Terminal
-	for _, doc := range s.Docs {
-		n.docs[doc.ID] = doc.Count
+	for _, p := range s.Postings {
+		n.docs[p.Ord] = p.Count
 	}
 
 	n.children = make([]*node, 0, len(s.Children))
@@ -104,7 +104,7 @@ func lcp(a, b string) int {
 	return i
 }
 
-func (t *Index) Insert(word string, docID fts.DocID) error {
+func (t *Index) Insert(word string, ord fts.DocOrd) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -124,7 +124,7 @@ func (t *Index) Insert(word string, docID fts.DocID) error {
 				rest = rest[p:]
 				if rest == "" {
 					current.terminal = true
-					current.docs[docID]++
+					current.docs[ord]++
 					return nil
 				}
 				goto NEXT
@@ -142,19 +142,19 @@ func (t *Index) Insert(word string, docID fts.DocID) error {
 			if newSuffix != "" {
 				n = newNode(newSuffix)
 				n.terminal = true
-				n.docs[docID]++
+				n.docs[ord]++
 				middle.children = append(middle.children, n)
 				return nil
 			}
 
 			middle.terminal = true
-			middle.docs[docID]++
+			middle.docs[ord]++
 			return nil
 		}
 
 		n = newNode(rest)
 		n.terminal = true
-		n.docs[docID]++
+		n.docs[ord]++
 		current.children = append(current.children, n)
 		return nil
 
@@ -162,7 +162,7 @@ func (t *Index) Insert(word string, docID fts.DocID) error {
 	}
 }
 
-func (t *Index) Search(word string) ([]fts.DocRef, error) {
+func (t *Index) Search(word string) ([]fts.Posting, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
@@ -175,17 +175,17 @@ func (t *Index) Search(word string) ([]fts.DocRef, error) {
 			return nil, nil
 		}
 		if exact {
-			return collectDocs(nextNode.docs), nil
+			return collectPostings(nextNode.docs), nil
 		}
 		current = nextNode
 		rest = nextRest
 	}
 }
 
-func collectDocs(docs map[fts.DocID]uint32) []fts.DocRef {
-	res := make([]fts.DocRef, 0, len(docs))
-	for id, count := range docs {
-		res = append(res, fts.DocRef{ID: id, Count: count})
+func collectPostings(docs map[fts.DocOrd]uint32) []fts.Posting {
+	res := make([]fts.Posting, 0, len(docs))
+	for ord, count := range docs {
+		res = append(res, fts.Posting{Ord: ord, Count: count})
 	}
 	return res
 }
